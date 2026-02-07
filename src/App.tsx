@@ -1,4 +1,4 @@
-import { type CSSProperties, useEffect, useMemo, useRef, useState } from "react";
+import { type CSSProperties, type ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 import Tabletop, { type TokenContextAction, type TokenSummary } from "./components/Tabletop";
 
 type ContextActionInput =
@@ -6,6 +6,12 @@ type ContextActionInput =
   | { type: "duplicate"; tokenId: string }
   | { type: "rename"; tokenId: string; name: string }
   | { type: "setHp"; tokenId: string; hpCurrent: number; hpMax: number };
+
+type AssetImage = {
+  id: string;
+  name: string;
+  url: string;
+};
 
 const mergeOrderWithTokens = (previousOrder: string[], tokens: TokenSummary[]) => {
   const tokenIds = tokens.map((token) => token.id);
@@ -32,15 +38,19 @@ const sortOrderByInitiativeDesc = (order: string[], initiatives: Record<string, 
 export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [snapToGrid, setSnapToGrid] = useState(true);
-  const [initiativeOpen, setInitiativeOpen] = useState(true);
+  const [assetsOpen, setAssetsOpen] = useState(false);
+  const [initiativeOpen, setInitiativeOpen] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; tokenId: string } | null>(null);
   const [contextAction, setContextAction] = useState<TokenContextAction | null>(null);
+  const [assets, setAssets] = useState<AssetImage[]>([]);
   const [tokens, setTokens] = useState<TokenSummary[]>([]);
   const [initiativeById, setInitiativeById] = useState<Record<string, number>>({});
   const [initiativeOrder, setInitiativeOrder] = useState<string[]>([]);
   const [activeInitiativeTokenId, setActiveInitiativeTokenId] = useState<string | null>(null);
   const actionNonceRef = useRef(1);
   const contextMenuRef = useRef<HTMLDivElement | null>(null);
+  const assetInputRef = useRef<HTMLInputElement | null>(null);
+  const assetUrlsRef = useRef<string[]>([]);
   const sortedInitiativeOrder = useMemo(
     () => sortOrderByInitiativeDesc(mergeOrderWithTokens(initiativeOrder, tokens), initiativeById),
     [initiativeOrder, initiativeById, tokens]
@@ -99,6 +109,18 @@ export default function App() {
     });
   }, [tokens]);
 
+  useEffect(() => {
+    assetUrlsRef.current = assets.map((asset) => asset.url);
+  }, [assets]);
+
+  useEffect(() => {
+    return () => {
+      for (const url of assetUrlsRef.current) {
+        URL.revokeObjectURL(url);
+      }
+    };
+  }, []);
+
   const handleRenameToken = (tokenId: string) => {
     const nextName = window.prompt("Rename token:");
     if (nextName === null) return;
@@ -153,6 +175,27 @@ export default function App() {
     setActiveInitiativeTokenId(null);
   };
 
+  const handleImportImages = () => {
+    assetInputRef.current?.click();
+  };
+
+  const handleAssetFilesChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const fileList = event.target.files;
+    if (!fileList || fileList.length === 0) return;
+
+    const imported: AssetImage[] = [];
+    for (const file of Array.from(fileList)) {
+      imported.push({
+        id: `${file.name}-${file.size}-${file.lastModified}-${crypto.randomUUID()}`,
+        name: file.name,
+        url: URL.createObjectURL(file),
+      });
+    }
+
+    setAssets((previous) => [...previous, ...imported]);
+    event.target.value = "";
+  };
+
   return (
     <div style={{ position: "fixed", inset: 0 }}>
       <Tabletop
@@ -163,10 +206,125 @@ export default function App() {
         onRequestCloseContextMenu={closeContextMenu}
       />
 
+      <input
+        ref={assetInputRef}
+        type="file"
+        accept="image/*"
+        multiple
+        onChange={handleAssetFilesChange}
+        style={{ display: "none" }}
+      />
+
       <div
         style={{
           position: "fixed",
-          top: 12,
+          top: settingsOpen ? 124 : 56,
+          right: 12,
+          width: 354,
+          maxHeight: "calc(100vh - 68px)",
+          zIndex: 1005,
+          display: "flex",
+          alignItems: "flex-start",
+          gap: 6,
+          transform: assetsOpen ? "translateX(0)" : "translateX(266px)",
+          transition: "transform 160ms ease, top 120ms ease",
+        }}
+      >
+        <button
+          type="button"
+          onClick={() => setAssetsOpen((open) => !open)}
+          style={{
+            width: 88,
+            border: "1px solid #4a4a4a",
+            borderRadius: 8,
+            background: "rgba(18,18,18,0.94)",
+            color: "#f2f2f2",
+            fontSize: 12,
+            padding: "10px 8px",
+            cursor: "pointer",
+            userSelect: "none",
+          }}
+        >
+          {assetsOpen ? "Hide" : "Assets"}
+        </button>
+
+        <div
+          style={{
+            width: 260,
+            border: "1px solid #4a4a4a",
+            borderRadius: 10,
+            background: "rgba(18,18,18,0.95)",
+            color: "#f2f2f2",
+            padding: 10,
+            display: "grid",
+            gridAutoFlow: "row",
+            gap: 10,
+            fontFamily: "sans-serif",
+          }}
+        >
+          <div style={{ fontSize: 15, fontWeight: 700 }}>Assets</div>
+          <button type="button" onClick={handleImportImages} style={trackerButtonStyle}>
+            Import Images
+          </button>
+
+          <div
+            style={{
+              border: "1px solid #3a3a3a",
+              borderRadius: 8,
+              overflowY: "auto",
+              padding: 8,
+              display: "grid",
+              gap: 8,
+              maxHeight: "calc(100vh - 180px)",
+              gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+            }}
+          >
+            {assets.length === 0 ? (
+              <div style={{ gridColumn: "1 / -1", fontSize: 12, color: "#b6b6b6" }}>No images imported</div>
+            ) : (
+              assets.map((asset) => (
+                <div
+                  key={asset.id}
+                  style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 5,
+                  }}
+                >
+                  <img
+                    src={asset.url}
+                    alt={asset.name}
+                    style={{
+                      width: "100%",
+                      aspectRatio: "1 / 1",
+                      objectFit: "cover",
+                      borderRadius: 6,
+                      border: "1px solid #3f3f3f",
+                    }}
+                  />
+                  <div
+                    title={asset.name}
+                    style={{
+                      fontSize: 11,
+                      color: "#d5d5d5",
+                      whiteSpace: "nowrap",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                    }}
+                  >
+                    {asset.name}
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div
+        style={{
+          position: "fixed",
+          top: 56,
           left: 12,
           zIndex: 1100,
           width: 354,
