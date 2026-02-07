@@ -21,8 +21,17 @@ type TokenRecord = {
   graphic: Graphics;
 };
 
-export default function Tabletop() {
+type TabletopProps = {
+  snapToGrid?: boolean;
+};
+
+export default function Tabletop({ snapToGrid = true }: TabletopProps) {
   const hostRef = useRef<HTMLDivElement>(null);
+  const snapToGridRef = useRef(snapToGrid);
+
+  useEffect(() => {
+    snapToGridRef.current = snapToGrid;
+  }, [snapToGrid]);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -83,18 +92,22 @@ export default function Tabletop() {
 
       const halfWidth = Math.max(app.screen.width * 2, 2000);
       const halfHeight = Math.max(app.screen.height * 2, 2000);
+      const startX = Math.floor(-halfWidth / GRID_CELL_SIZE) * GRID_CELL_SIZE;
+      const endX = Math.ceil(halfWidth / GRID_CELL_SIZE) * GRID_CELL_SIZE;
+      const startY = Math.floor(-halfHeight / GRID_CELL_SIZE) * GRID_CELL_SIZE;
+      const endY = Math.ceil(halfHeight / GRID_CELL_SIZE) * GRID_CELL_SIZE;
 
       grid.clear();
       grid.setStrokeStyle({ width: 1, color: 0x505050, alpha: 0.9 });
 
-      for (let x = -halfWidth; x <= halfWidth; x += GRID_CELL_SIZE) {
-        grid.moveTo(x, -halfHeight);
-        grid.lineTo(x, halfHeight);
+      for (let x = startX; x <= endX; x += GRID_CELL_SIZE) {
+        grid.moveTo(x, startY);
+        grid.lineTo(x, endY);
       }
 
-      for (let y = -halfHeight; y <= halfHeight; y += GRID_CELL_SIZE) {
-        grid.moveTo(-halfWidth, y);
-        grid.lineTo(halfWidth, y);
+      for (let y = startY; y <= endY; y += GRID_CELL_SIZE) {
+        grid.moveTo(startX, y);
+        grid.lineTo(endX, y);
       }
 
       grid.stroke();
@@ -112,6 +125,23 @@ export default function Tabletop() {
         color: 0xffffff,
         alpha: 1,
       });
+    };
+
+    const snapToCellCenter = (value: number) => {
+      const halfCell = GRID_CELL_SIZE / 2;
+      const baseCenter = Math.floor(value / GRID_CELL_SIZE) * GRID_CELL_SIZE + halfCell;
+      const neighborCenter = baseCenter + GRID_CELL_SIZE;
+
+      return Math.abs(value - baseCenter) <= Math.abs(value - neighborCenter)
+        ? baseCenter
+        : neighborCenter;
+    };
+
+    const snapTokenPositionToGrid = (token: TokenRecord) => {
+      token.graphic.position.set(
+        snapToCellCenter(token.graphic.position.x),
+        snapToCellCenter(token.graphic.position.y)
+      );
     };
 
     const setupInteractions = (canvas: HTMLCanvasElement, stage: Container, tokens: TokenRecord[]) => {
@@ -135,6 +165,24 @@ export default function Tabletop() {
       let tokenDownX = 0;
       let tokenDownY = 0;
       let tokenDragMoved = false;
+
+      const finishTokenDrag = (selectOnClick: boolean) => {
+        if (!draggingToken) return;
+
+        const releasedToken = draggingToken;
+
+        if (snapToGridRef.current) {
+          snapTokenPositionToGrid(releasedToken);
+        }
+
+        if (selectOnClick && !tokenDragMoved) {
+          setSelection([releasedToken.id]);
+        }
+
+        draggingToken = null;
+        tokenPointerId = null;
+        canvas.style.cursor = "grab";
+      };
 
       const onStagePointerDown = (event: any) => {
         if (!world) return;
@@ -229,9 +277,7 @@ export default function Tabletop() {
         }
 
         if (draggingToken && event.pointerId === tokenPointerId) {
-          draggingToken = null;
-          tokenPointerId = null;
-          canvas.style.cursor = "grab";
+          finishTokenDrag(false);
         }
       };
 
@@ -287,14 +333,7 @@ export default function Tabletop() {
           if (!draggingToken || event.pointerId !== tokenPointerId) return;
 
           event.stopPropagation();
-          const releasedToken = draggingToken;
-          draggingToken = null;
-          tokenPointerId = null;
-          canvas.style.cursor = "grab";
-
-          if (!tokenDragMoved) {
-            setSelection([releasedToken.id]);
-          }
+          finishTokenDrag(true);
         };
 
         token.graphic.eventMode = "static";
