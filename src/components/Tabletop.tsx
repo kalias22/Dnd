@@ -8,6 +8,11 @@ const MIN_ZOOM = 0.25;
 const MAX_ZOOM = 3;
 const ZOOM_SENSITIVITY = 0.0015;
 const SELECTION_DRAG_THRESHOLD = 3;
+const ROTATE_STEP_DEG = 15;
+const TOKEN_SCALE_DOWN_FACTOR = 0.9;
+const TOKEN_SCALE_UP_FACTOR = 1.1;
+const MIN_TOKEN_SCALE = 0.25;
+const MAX_TOKEN_SCALE = 4;
 const TOKEN_DEFINITIONS = [
   { id: "token-1", x: 200, y: 200, radius: 18, color: 0xd35400 },
   { id: "token-2", x: 320, y: 260, radius: 16, color: 0x1abc9c },
@@ -19,6 +24,8 @@ type TokenRecord = {
   radius: number;
   color: number;
   graphic: Graphics;
+  rotationDeg: number;
+  scale: number;
 };
 
 type TabletopProps = {
@@ -46,6 +53,7 @@ export default function Tabletop({ snapToGrid = true }: TabletopProps) {
     let tokenRecords: TokenRecord[] = [];
     let selectedTokenIds = new Set<string>();
     let detachInteractions: (() => void) | null = null;
+    let detachKeyboard: (() => void) | null = null;
 
     const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 
@@ -56,6 +64,8 @@ export default function Tabletop({ snapToGrid = true }: TabletopProps) {
         token.graphic.setStrokeStyle({ width: 3, color: 0xfff07a, alpha: 1 });
         token.graphic.circle(0, 0, token.radius + 4).stroke();
       }
+      token.graphic.rotation = (token.rotationDeg * Math.PI) / 180;
+      token.graphic.scale.set(token.scale);
     };
 
     const refreshTokenStyles = () => {
@@ -67,6 +77,12 @@ export default function Tabletop({ snapToGrid = true }: TabletopProps) {
     const setSelection = (ids: string[]) => {
       selectedTokenIds = new Set(ids);
       refreshTokenStyles();
+    };
+
+    const getPrimarySelectedToken = () => {
+      const firstSelectedId = selectedTokenIds.values().next().value as string | undefined;
+      if (!firstSelectedId) return null;
+      return tokenRecords.find((token) => token.id === firstSelectedId) ?? null;
     };
 
     const drawSelectionRect = (x0: number, y0: number, x1: number, y1: number) => {
@@ -361,6 +377,57 @@ export default function Tabletop({ snapToGrid = true }: TabletopProps) {
       };
     };
 
+    const setupKeyboardShortcuts = () => {
+      const onKeyDown = (event: KeyboardEvent) => {
+        const target = event.target as HTMLElement | null;
+        if (
+          target &&
+          (target.tagName === "INPUT" ||
+            target.tagName === "TEXTAREA" ||
+            target.tagName === "SELECT" ||
+            target.isContentEditable)
+        ) {
+          return;
+        }
+
+        const token = getPrimarySelectedToken();
+        if (!token) return;
+
+        let handled = false;
+        switch (event.key) {
+          case "q":
+          case "Q":
+            token.rotationDeg -= ROTATE_STEP_DEG;
+            handled = true;
+            break;
+          case "e":
+          case "E":
+            token.rotationDeg += ROTATE_STEP_DEG;
+            handled = true;
+            break;
+          case "[":
+            token.scale = clamp(token.scale * TOKEN_SCALE_DOWN_FACTOR, MIN_TOKEN_SCALE, MAX_TOKEN_SCALE);
+            handled = true;
+            break;
+          case "]":
+            token.scale = clamp(token.scale * TOKEN_SCALE_UP_FACTOR, MIN_TOKEN_SCALE, MAX_TOKEN_SCALE);
+            handled = true;
+            break;
+          default:
+            break;
+        }
+
+        if (!handled) return;
+        event.preventDefault();
+        drawToken(token, selectedTokenIds.has(token.id));
+      };
+
+      window.addEventListener("keydown", onKeyDown);
+      return () => {
+        window.removeEventListener("keydown", onKeyDown);
+      };
+    };
+
     const onResize = () => {
       if (app) {
         app.stage.hitArea = new Rectangle(0, 0, app.screen.width, app.screen.height);
@@ -412,6 +479,8 @@ export default function Tabletop({ snapToGrid = true }: TabletopProps) {
           radius: token.radius,
           color: token.color,
           graphic: tokenGraphic,
+          rotationDeg: 0,
+          scale: 1,
         };
       });
 
@@ -420,6 +489,7 @@ export default function Tabletop({ snapToGrid = true }: TabletopProps) {
 
       setSelection([]);
       detachInteractions = setupInteractions(canvas, nextApp.stage, tokenRecords);
+      detachKeyboard = setupKeyboardShortcuts();
 
       onResize();
       window.addEventListener("resize", onResize);
@@ -431,6 +501,7 @@ export default function Tabletop({ snapToGrid = true }: TabletopProps) {
       disposed = true;
       window.removeEventListener("resize", onResize);
       if (detachInteractions) detachInteractions();
+      if (detachKeyboard) detachKeyboard();
       if (app) app.destroy(true, { children: true });
     };
   }, []);
