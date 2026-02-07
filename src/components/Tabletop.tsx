@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { Application, Container, Graphics, Rectangle } from "pixi.js";
+import { Application, Container, Graphics, Rectangle, Text } from "pixi.js";
 
 const GRID_CELL_SIZE = 50;
 const ORIGIN_MARKER_SIZE = 22;
@@ -14,16 +14,23 @@ const TOKEN_SCALE_UP_FACTOR = 1.1;
 const MIN_TOKEN_SCALE = 0.25;
 const MAX_TOKEN_SCALE = 4;
 const TOKEN_DEFINITIONS = [
-  { id: "token-1", x: 200, y: 200, radius: 18, color: 0xd35400 },
-  { id: "token-2", x: 320, y: 260, radius: 16, color: 0x1abc9c },
-  { id: "token-3", x: 420, y: 140, radius: 20, color: 0x3498db },
+  { id: "token-1", name: "Aria", x: 200, y: 200, radius: 18, color: 0xd35400, hpCurrent: 22, hpMax: 30 },
+  { id: "token-2", name: "Bram", x: 320, y: 260, radius: 16, color: 0x1abc9c, hpCurrent: 11, hpMax: 18 },
+  { id: "token-3", name: "Cora", x: 420, y: 140, radius: 20, color: 0x3498db, hpCurrent: 35, hpMax: 40 },
 ];
 
 type TokenRecord = {
   id: string;
+  name: string;
   radius: number;
   color: number;
-  graphic: Graphics;
+  hpCurrent: number;
+  hpMax: number;
+  container: Container;
+  body: Graphics;
+  label: Text;
+  hpBarBg: Graphics;
+  hpBarFill: Graphics;
   rotationDeg: number;
   scale: number;
 };
@@ -58,14 +65,36 @@ export default function Tabletop({ snapToGrid = true }: TabletopProps) {
     const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 
     const drawToken = (token: TokenRecord, selected: boolean) => {
-      token.graphic.clear();
-      token.graphic.circle(0, 0, token.radius).fill({ color: token.color, alpha: 1 });
+      token.body.clear();
+      token.body.circle(0, 0, token.radius).fill({ color: token.color, alpha: 1 });
       if (selected) {
-        token.graphic.setStrokeStyle({ width: 3, color: 0xfff07a, alpha: 1 });
-        token.graphic.circle(0, 0, token.radius + 4).stroke();
+        token.body.setStrokeStyle({ width: 3, color: 0xfff07a, alpha: 1 });
+        token.body.circle(0, 0, token.radius + 4).stroke();
       }
-      token.graphic.rotation = (token.rotationDeg * Math.PI) / 180;
-      token.graphic.scale.set(token.scale);
+
+      token.label.text = token.name;
+      token.label.x = -token.label.width / 2;
+      token.label.y = -token.radius - token.label.height - 8;
+
+      const hpRatio = clamp(token.hpCurrent / Math.max(token.hpMax, 1), 0, 1);
+      const hpBarWidth = token.radius * 2;
+      const hpBarHeight = 6;
+      const hpBarY = token.radius + 8;
+
+      token.hpBarBg.clear();
+      token.hpBarBg.rect(-hpBarWidth / 2, hpBarY, hpBarWidth, hpBarHeight).fill({
+        color: 0x1b1b1b,
+        alpha: 0.95,
+      });
+
+      token.hpBarFill.clear();
+      token.hpBarFill.rect(-hpBarWidth / 2, hpBarY, hpBarWidth * hpRatio, hpBarHeight).fill({
+        color: 0x34d17c,
+        alpha: 1,
+      });
+
+      token.container.rotation = (token.rotationDeg * Math.PI) / 180;
+      token.container.scale.set(token.scale);
     };
 
     const refreshTokenStyles = () => {
@@ -154,9 +183,9 @@ export default function Tabletop({ snapToGrid = true }: TabletopProps) {
     };
 
     const snapTokenPositionToGrid = (token: TokenRecord) => {
-      token.graphic.position.set(
-        snapToCellCenter(token.graphic.position.x),
-        snapToCellCenter(token.graphic.position.y)
+      token.container.position.set(
+        snapToCellCenter(token.container.position.x),
+        snapToCellCenter(token.container.position.y)
       );
     };
 
@@ -251,7 +280,7 @@ export default function Tabletop({ snapToGrid = true }: TabletopProps) {
 
         if (draggingToken && event.pointerId === tokenPointerId) {
           const local = world.toLocal(event.global);
-          draggingToken.graphic.position.set(local.x + tokenOffsetX, local.y + tokenOffsetY);
+          draggingToken.container.position.set(local.x + tokenOffsetX, local.y + tokenOffsetY);
           if (
             Math.abs(event.global.x - tokenDownX) > SELECTION_DRAG_THRESHOLD ||
             Math.abs(event.global.y - tokenDownY) > SELECTION_DRAG_THRESHOLD
@@ -279,7 +308,7 @@ export default function Tabletop({ snapToGrid = true }: TabletopProps) {
 
             const selectedIds = tokens
               .filter((token) => {
-                const center = world.toGlobal(token.graphic.position);
+                const center = world.toGlobal(token.container.position);
                 return center.x >= left && center.x <= right && center.y >= top && center.y <= bottom;
               })
               .map((token) => token.id);
@@ -340,8 +369,8 @@ export default function Tabletop({ snapToGrid = true }: TabletopProps) {
           tokenDownY = event.global.y;
           tokenDragMoved = false;
           const local = world.toLocal(event.global);
-          tokenOffsetX = token.graphic.x - local.x;
-          tokenOffsetY = token.graphic.y - local.y;
+          tokenOffsetX = token.container.x - local.x;
+          tokenOffsetY = token.container.y - local.y;
           canvas.style.cursor = "grabbing";
         };
 
@@ -352,16 +381,16 @@ export default function Tabletop({ snapToGrid = true }: TabletopProps) {
           finishTokenDrag(true);
         };
 
-        token.graphic.eventMode = "static";
-        token.graphic.cursor = "pointer";
-        token.graphic.on("pointerdown", onTokenPointerDown);
-        token.graphic.on("pointerup", onTokenPointerUp);
-        token.graphic.on("pointerupoutside", onTokenPointerUp);
+        token.body.eventMode = "static";
+        token.body.cursor = "pointer";
+        token.body.on("pointerdown", onTokenPointerDown);
+        token.body.on("pointerup", onTokenPointerUp);
+        token.body.on("pointerupoutside", onTokenPointerUp);
 
         removeTokenListeners.push(() => {
-          token.graphic.off("pointerdown", onTokenPointerDown);
-          token.graphic.off("pointerup", onTokenPointerUp);
-          token.graphic.off("pointerupoutside", onTokenPointerUp);
+          token.body.off("pointerdown", onTokenPointerDown);
+          token.body.off("pointerup", onTokenPointerUp);
+          token.body.off("pointerupoutside", onTokenPointerUp);
         });
       }
 
@@ -470,15 +499,41 @@ export default function Tabletop({ snapToGrid = true }: TabletopProps) {
       world.addChild(originMarker);
 
       tokenRecords = TOKEN_DEFINITIONS.map((token) => {
-        const tokenGraphic = new Graphics();
-        tokenGraphic.label = token.id;
-        tokenGraphic.position.set(token.x, token.y);
-        world!.addChild(tokenGraphic);
+        const tokenContainer = new Container();
+        tokenContainer.label = token.id;
+        tokenContainer.position.set(token.x, token.y);
+
+        const tokenBody = new Graphics();
+        const tokenLabel = new Text({
+          text: token.name,
+          style: {
+            fill: 0xffffff,
+            fontSize: 12,
+            fontFamily: "Arial",
+            fontWeight: "600",
+          },
+        });
+        const hpBarBg = new Graphics();
+        const hpBarFill = new Graphics();
+
+        tokenContainer.addChild(tokenBody);
+        tokenContainer.addChild(tokenLabel);
+        tokenContainer.addChild(hpBarBg);
+        tokenContainer.addChild(hpBarFill);
+        world!.addChild(tokenContainer);
+
         return {
           id: token.id,
+          name: token.name,
           radius: token.radius,
           color: token.color,
-          graphic: tokenGraphic,
+          hpCurrent: token.hpCurrent,
+          hpMax: token.hpMax,
+          container: tokenContainer,
+          body: tokenBody,
+          label: tokenLabel,
+          hpBarBg,
+          hpBarFill,
           rotationDeg: 0,
           scale: 1,
         };
