@@ -15,6 +15,7 @@ const MIN_TOKEN_SCALE = 0.25;
 const MAX_TOKEN_SCALE = 4;
 const TOKEN_MOVE_SPEED = 600;
 const PLACED_ASSET_MAX_SIZE = 240;
+const ENTITY_COLORS = [0xd35400, 0x1abc9c, 0x3498db, 0x9b59b6, 0xe74c3c, 0xf1c40f];
 const TOKEN_DEFINITIONS = [
   { id: "token-1", name: "Aria", x: 200, y: 200, radius: 18, color: 0xd35400, hpCurrent: 22, hpMax: 30 },
   { id: "token-2", name: "Bram", x: 320, y: 260, radius: 16, color: 0x1abc9c, hpCurrent: 11, hpMax: 18 },
@@ -41,6 +42,7 @@ type TokenRecord = {
 };
 
 export type TokenContextAction =
+  | { nonce: number; type: "add"; name: string }
   | { nonce: number; type: "delete"; tokenId: string }
   | { nonce: number; type: "duplicate"; tokenId: string }
   | { nonce: number; type: "rename"; tokenId: string; name: string }
@@ -458,6 +460,46 @@ export default function Tabletop({
       }
     };
 
+    const addEntity = (name: string) => {
+      const trimmedName = name.trim();
+      if (!trimmedName) return;
+
+      const idBase = `entity-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+      let nextId = idBase;
+      let suffix = 1;
+      while (tokenRecords.some((token) => token.id === nextId)) {
+        suffix += 1;
+        nextId = `${idBase}-${suffix}`;
+      }
+
+      let spawnX = GRID_CELL_SIZE / 2;
+      let spawnY = GRID_CELL_SIZE / 2;
+      if (app && world) {
+        const centerX = app.screen.width / 2;
+        const centerY = app.screen.height / 2;
+        spawnX = snapToCellCenter((centerX - world.position.x) / world.scale.x);
+        spawnY = snapToCellCenter((centerY - world.position.y) / world.scale.y);
+      }
+
+      const color = ENTITY_COLORS[tokenRecords.length % ENTITY_COLORS.length];
+      const created = createTokenRecord({
+        id: nextId,
+        name: trimmedName,
+        x: spawnX,
+        y: spawnY,
+        radius: 18,
+        color,
+        hpCurrent: 10,
+        hpMax: 10,
+      });
+
+      if (created) {
+        setSelection([created.id]);
+        rebindInteractionHandlers?.();
+        emitTokensChange();
+      }
+    };
+
     const renameToken = (tokenId: string, name: string) => {
       const token = tokenRecords.find((item) => item.id === tokenId);
       if (!token) return;
@@ -477,6 +519,9 @@ export default function Tabletop({
 
     runContextActionRef.current = (action: TokenContextAction) => {
       switch (action.type) {
+        case "add":
+          addEntity(action.name);
+          break;
         case "delete":
           deleteTokenById(action.tokenId);
           break;

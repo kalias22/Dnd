@@ -1,7 +1,8 @@
-import { type CSSProperties, type ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
+import { type CSSProperties, type ChangeEvent, useEffect, useRef, useState } from "react";
 import Tabletop, { type PlacingAsset, type TokenContextAction, type TokenSummary } from "./components/Tabletop";
 
 type ContextActionInput =
+  | { type: "add"; name: string }
   | { type: "delete"; tokenId: string }
   | { type: "duplicate"; tokenId: string }
   | { type: "rename"; tokenId: string; name: string }
@@ -13,49 +14,31 @@ type AssetImage = {
   url: string;
 };
 
-const mergeOrderWithTokens = (previousOrder: string[], tokens: TokenSummary[]) => {
-  const tokenIds = tokens.map((token) => token.id);
-  const tokenIdSet = new Set(tokenIds);
-  const kept = previousOrder.filter((tokenId) => tokenIdSet.has(tokenId));
-  const keptSet = new Set(kept);
-  const appended = tokenIds.filter((tokenId) => !keptSet.has(tokenId));
-  return [...kept, ...appended];
-};
-
-const sortOrderByInitiativeDesc = (order: string[], initiatives: Record<string, number>) => {
-  return [...order].sort((a, b) => {
-    const aValue = initiatives[a];
-    const bValue = initiatives[b];
-    if (typeof aValue === "number" && typeof bValue === "number") {
-      return bValue - aValue;
-    }
-    if (typeof aValue === "number") return -1;
-    if (typeof bValue === "number") return 1;
-    return 0;
-  });
-};
+type AppMode = "home" | "create" | "play";
 
 export default function App() {
+  const [mode, setMode] = useState<AppMode>("home");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [snapToGrid, setSnapToGrid] = useState(true);
   const [assetsOpen, setAssetsOpen] = useState(false);
-  const [initiativeOpen, setInitiativeOpen] = useState(false);
+  const [entitiesOpen, setEntitiesOpen] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; tokenId: string } | null>(null);
   const [contextAction, setContextAction] = useState<TokenContextAction | null>(null);
   const [assets, setAssets] = useState<AssetImage[]>([]);
   const [placingAsset, setPlacingAsset] = useState<PlacingAsset | null>(null);
   const [tokens, setTokens] = useState<TokenSummary[]>([]);
-  const [initiativeById, setInitiativeById] = useState<Record<string, number>>({});
-  const [initiativeOrder, setInitiativeOrder] = useState<string[]>([]);
-  const [activeInitiativeTokenId, setActiveInitiativeTokenId] = useState<string | null>(null);
   const actionNonceRef = useRef(1);
   const contextMenuRef = useRef<HTMLDivElement | null>(null);
   const assetInputRef = useRef<HTMLInputElement | null>(null);
   const assetUrlsRef = useRef<string[]>([]);
-  const sortedInitiativeOrder = useMemo(
-    () => sortOrderByInitiativeDesc(mergeOrderWithTokens(initiativeOrder, tokens), initiativeById),
-    [initiativeOrder, initiativeById, tokens]
-  );
+
+  useEffect(() => {
+    if (mode !== "create") {
+      setAssetsOpen(false);
+      setEntitiesOpen(false);
+      setPlacingAsset(null);
+    }
+  }, [mode]);
 
   const closeContextMenu = () => {
     setContextMenu(null);
@@ -88,29 +71,6 @@ export default function App() {
   }, [contextMenu]);
 
   useEffect(() => {
-    const tokenIds = tokens.map((token) => token.id);
-    const tokenIdSet = new Set(tokenIds);
-
-    setInitiativeById((previous) => {
-      const next: Record<string, number> = {};
-      for (const tokenId of tokenIds) {
-        const value = previous[tokenId];
-        if (typeof value === "number") {
-          next[tokenId] = value;
-        }
-      }
-      return next;
-    });
-
-    setInitiativeOrder((previous) => mergeOrderWithTokens(previous, tokens));
-
-    setActiveInitiativeTokenId((previous) => {
-      if (!previous || !tokenIdSet.has(previous)) return null;
-      return previous;
-    });
-  }, [tokens]);
-
-  useEffect(() => {
     assetUrlsRef.current = assets.map((asset) => asset.url);
   }, [assets]);
 
@@ -137,8 +97,8 @@ export default function App() {
     };
   }, [placingAsset]);
 
-  const handleRenameToken = (tokenId: string) => {
-    const nextName = window.prompt("Rename token:");
+  const handleRenameEntity = (tokenId: string) => {
+    const nextName = window.prompt("Rename entity:");
     if (nextName === null) return;
 
     const name = nextName.trim();
@@ -146,7 +106,7 @@ export default function App() {
     dispatchTokenAction({ type: "rename", tokenId, name });
   };
 
-  const handleSetTokenHp = (tokenId: string) => {
+  const handleSetEntityHp = (tokenId: string) => {
     const value = window.prompt('Set HP as "current/max"', "10/10");
     if (value === null) return;
 
@@ -160,35 +120,14 @@ export default function App() {
     dispatchTokenAction({ type: "setHp", tokenId, hpCurrent, hpMax });
   };
 
-  const rollAllInitiative = () => {
-    const rolled: Record<string, number> = {};
-    for (const token of tokens) {
-      rolled[token.id] = Math.floor(Math.random() * 20) + 1;
+  const handleAddEntity = () => {
+    let nextIndex = tokens.length + 1;
+    const existingNames = new Set(tokens.map((token) => token.name.toLowerCase()));
+    while (existingNames.has(`entity ${nextIndex}`)) {
+      nextIndex += 1;
     }
 
-    setInitiativeById(rolled);
-    setInitiativeOrder((previous) => sortOrderByInitiativeDesc(mergeOrderWithTokens(previous, tokens), rolled));
-  };
-
-  const nextInitiativeTurn = () => {
-    if (sortedInitiativeOrder.length === 0) {
-      setActiveInitiativeTokenId(null);
-      return;
-    }
-
-    setInitiativeOrder(sortedInitiativeOrder);
-    setActiveInitiativeTokenId((current) => {
-      if (!current) return sortedInitiativeOrder[0];
-      const currentIndex = sortedInitiativeOrder.indexOf(current);
-      if (currentIndex < 0) return sortedInitiativeOrder[0];
-      return sortedInitiativeOrder[(currentIndex + 1) % sortedInitiativeOrder.length];
-    });
-  };
-
-  const clearInitiativeTracker = () => {
-    setInitiativeById({});
-    setInitiativeOrder([]);
-    setActiveInitiativeTokenId(null);
+    dispatchTokenAction({ type: "add", name: `Entity ${nextIndex}` });
   };
 
   const handleImportImages = () => {
@@ -212,288 +151,263 @@ export default function App() {
     event.target.value = "";
   };
 
+  if (mode === "home") {
+    return (
+      <div
+        style={{
+          position: "fixed",
+          inset: 0,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "radial-gradient(circle at top, #1d2638 0%, #0b0c10 55%, #08090c 100%)",
+          color: "#f2f2f2",
+          fontFamily: "sans-serif",
+          padding: 16,
+        }}
+      >
+        <div
+          style={{
+            width: "min(560px, 100%)",
+            border: "1px solid #3d4558",
+            borderRadius: 14,
+            background: "rgba(14,16,22,0.92)",
+            boxShadow: "0 20px 48px rgba(0,0,0,0.35)",
+            padding: "28px 24px",
+            display: "grid",
+            gap: 16,
+            textAlign: "center",
+          }}
+        >
+          <h1 style={{ margin: 0, fontSize: 38, lineHeight: 1.1, letterSpacing: 0.4 }}>DnD Virtual Tabletop</h1>
+          <div style={{ display: "flex", justifyContent: "center", gap: 12, flexWrap: "wrap" }}>
+            <button type="button" onClick={() => setMode("create")} style={homeButtonStyle}>
+              Create Campaign
+            </button>
+            <button type="button" onClick={() => setMode("play")} style={homeButtonStyle}>
+              Play Campaign
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div style={{ position: "fixed", inset: 0 }}>
       <Tabletop
         snapToGrid={snapToGrid}
         contextAction={contextAction}
-        placingAsset={placingAsset}
-        onPlacedAsset={() => setPlacingAsset(null)}
+        placingAsset={mode === "create" ? placingAsset : null}
+        onPlacedAsset={mode === "create" ? () => setPlacingAsset(null) : undefined}
         onTokensChange={setTokens}
         onTokenContextMenu={(tokenId, x, y) => setContextMenu({ tokenId, x, y })}
         onRequestCloseContextMenu={closeContextMenu}
       />
 
-      <input
-        ref={assetInputRef}
-        type="file"
-        accept="image/*"
-        multiple
-        onChange={handleAssetFilesChange}
-        style={{ display: "none" }}
-      />
+      {mode === "create" && (
+        <>
+          <input
+            ref={assetInputRef}
+            type="file"
+            accept="image/*"
+            multiple
+            onChange={handleAssetFilesChange}
+            style={{ display: "none" }}
+          />
 
-      <div
-        style={{
-          position: "fixed",
-          top: settingsOpen ? 124 : 56,
-          right: 12,
-          width: 354,
-          maxHeight: "calc(100vh - 68px)",
-          zIndex: 1005,
-          display: "flex",
-          alignItems: "flex-start",
-          gap: 6,
-          transform: assetsOpen ? "translateX(0)" : "translateX(266px)",
-          transition: "transform 160ms ease, top 120ms ease",
-        }}
-      >
-        <button
-          type="button"
-          onClick={() => setAssetsOpen((open) => !open)}
-          style={{
-            width: 88,
-            border: "1px solid #4a4a4a",
-            borderRadius: 8,
-            background: "rgba(18,18,18,0.94)",
-            color: "#f2f2f2",
-            fontSize: 12,
-            padding: "10px 8px",
-            cursor: "pointer",
-            userSelect: "none",
-          }}
-        >
-          {assetsOpen ? "Hide" : "Assets"}
-        </button>
-
-        <div
-          style={{
-            width: 260,
-            border: "1px solid #4a4a4a",
-            borderRadius: 10,
-            background: "rgba(18,18,18,0.95)",
-            color: "#f2f2f2",
-            padding: 10,
-            display: "grid",
-            gridAutoFlow: "row",
-            gap: 10,
-            fontFamily: "sans-serif",
-          }}
-        >
-          <div style={{ fontSize: 15, fontWeight: 700 }}>Assets</div>
-          <button type="button" onClick={handleImportImages} style={trackerButtonStyle}>
-            Import Images
-          </button>
           <div
             style={{
-              border: "1px solid #3a3a3a",
-              borderRadius: 8,
-              overflowY: "auto",
-              padding: 8,
-              display: "grid",
-              gap: 8,
-              maxHeight: "calc(100vh - 180px)",
-              gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+              position: "fixed",
+              top: settingsOpen ? 124 : 56,
+              right: 12,
+              width: 354,
+              maxHeight: "calc(100vh - 68px)",
+              zIndex: 1005,
+              display: "flex",
+              alignItems: "flex-start",
+              gap: 6,
+              transform: assetsOpen ? "translateX(0)" : "translateX(266px)",
+              transition: "transform 160ms ease, top 120ms ease",
             }}
           >
-            {assets.length === 0 ? (
-              <div style={{ gridColumn: "1 / -1", fontSize: 12, color: "#b6b6b6" }}>No images imported</div>
-            ) : (
-              assets.map((asset) => (
-                <div
-                  key={asset.id}
-                  style={{
-                    display: "flex",
-                    flexDirection: "column",
-                    gap: 5,
-                  }}
-                >
-                  <img
-                    src={asset.url}
-                    alt={asset.name}
-                    style={{
-                      width: "100%",
-                      aspectRatio: "1 / 1",
-                      objectFit: "cover",
-                      borderRadius: 6,
-                      border: "1px solid #3f3f3f",
-                    }}
-                  />
-                  <div
-                    title={asset.name}
-                    style={{
-                      fontSize: 11,
-                      color: "#d5d5d5",
-                      whiteSpace: "nowrap",
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                    }}
-                  >
-                    {asset.name}
-                  </div>
-                  <button
-                    type="button"
-                    onPointerDown={(event) => event.stopPropagation()}
-                    onClick={() => {
-                      setPlacingAsset({ id: asset.id, name: asset.name, url: asset.url });
-                    }}
-                    style={{
-                      ...trackerButtonStyle,
-                      padding: "4px 6px",
-                      fontSize: 11,
-                      background:
-                        placingAsset?.id === asset.id ? "rgba(76,123,255,0.35)" : "rgba(28,28,28,0.95)",
-                    }}
-                  >
-                    Place
-                  </button>
-                </div>
-              ))
-            )}
-          </div>
-        </div>
-      </div>
-
-      {placingAsset && (
-        <div
-          style={{
-            position: "fixed",
-            top: settingsOpen ? 124 : 56,
-            left: "50%",
-            transform: "translateX(-50%)",
-            zIndex: 1010,
-            border: "1px solid #3a3a3a",
-            borderRadius: 8,
-            padding: "8px 9px",
-            background: "rgba(18,18,18,0.95)",
-            color: "#d8e6ff",
-            fontSize: 12,
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            gap: 8,
-            width: "min(320px, calc(100vw - 24px))",
-            fontFamily: "sans-serif",
-          }}
-        >
-          <span title={placingAsset.name} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-            Placing: {placingAsset.name}
-          </span>
-          <button
-            type="button"
-            onClick={() => setPlacingAsset(null)}
-            style={{ ...trackerButtonStyle, padding: "3px 7px", fontSize: 11 }}
-          >
-            Cancel
-          </button>
-        </div>
-      )}
-
-      <div
-        style={{
-          position: "fixed",
-          top: 56,
-          left: 12,
-          zIndex: 1100,
-          width: 354,
-          display: "flex",
-          alignItems: "flex-start",
-          gap: 6,
-          transform: initiativeOpen ? "translateX(0)" : "translateX(-266px)",
-          transition: "transform 160ms ease",
-        }}
-      >
-        <div
-          style={{
-            width: 260,
-            border: "1px solid #4a4a4a",
-            borderRadius: 10,
-            background: "rgba(18,18,18,0.94)",
-            color: "#f2f2f2",
-            padding: 10,
-            display: "flex",
-            flexDirection: "column",
-            gap: 8,
-            fontFamily: "sans-serif",
-          }}
-        >
-          <div style={{ fontSize: 15, fontWeight: 700 }}>Initiative</div>
-
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-            <button type="button" onClick={rollAllInitiative} style={trackerButtonStyle}>
-              Roll All
+            <button
+              type="button"
+              onClick={() => setAssetsOpen((open) => !open)}
+              style={panelToggleButtonStyle}
+            >
+              {assetsOpen ? "Hide" : "Assets"}
             </button>
-            <button type="button" onClick={nextInitiativeTurn} style={trackerButtonStyle}>
-              Next
-            </button>
-            <button type="button" onClick={clearInitiativeTracker} style={trackerButtonStyle}>
-              Clear
-            </button>
+
+            <div style={sidePanelStyle}>
+              <div style={{ fontSize: 15, fontWeight: 700 }}>Assets</div>
+              <button type="button" onClick={handleImportImages} style={trackerButtonStyle}>
+                Import Images
+              </button>
+              <div
+                style={{
+                  border: "1px solid #3a3a3a",
+                  borderRadius: 8,
+                  overflowY: "auto",
+                  padding: 8,
+                  display: "grid",
+                  gap: 8,
+                  maxHeight: "calc(100vh - 180px)",
+                  gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+                }}
+              >
+                {assets.length === 0 ? (
+                  <div style={{ gridColumn: "1 / -1", fontSize: 12, color: "#b6b6b6" }}>No images imported</div>
+                ) : (
+                  assets.map((asset) => (
+                    <div
+                      key={asset.id}
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 5,
+                      }}
+                    >
+                      <img
+                        src={asset.url}
+                        alt={asset.name}
+                        style={{
+                          width: "100%",
+                          aspectRatio: "1 / 1",
+                          objectFit: "cover",
+                          borderRadius: 6,
+                          border: "1px solid #3f3f3f",
+                        }}
+                      />
+                      <div
+                        title={asset.name}
+                        style={{
+                          fontSize: 11,
+                          color: "#d5d5d5",
+                          whiteSpace: "nowrap",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                        }}
+                      >
+                        {asset.name}
+                      </div>
+                      <button
+                        type="button"
+                        onPointerDown={(event) => event.stopPropagation()}
+                        onClick={() => {
+                          setPlacingAsset({ id: asset.id, name: asset.name, url: asset.url });
+                        }}
+                        style={{
+                          ...trackerButtonStyle,
+                          padding: "4px 6px",
+                          fontSize: 11,
+                          background:
+                            placingAsset?.id === asset.id ? "rgba(76,123,255,0.35)" : "rgba(28,28,28,0.95)",
+                        }}
+                      >
+                        Place
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
           </div>
 
           <div
             style={{
-              border: "1px solid #3a3a3a",
-              borderRadius: 8,
-              overflow: "hidden",
-              maxHeight: 240,
-              overflowY: "auto",
+              position: "fixed",
+              top: 56,
+              left: 12,
+              zIndex: 1100,
+              width: 354,
+              display: "flex",
+              alignItems: "flex-start",
+              gap: 6,
+              transform: entitiesOpen ? "translateX(0)" : "translateX(-266px)",
+              transition: "transform 160ms ease",
             }}
           >
-            {sortedInitiativeOrder.length === 0 ? (
-              <div style={{ padding: 10, fontSize: 13, color: "#b6b6b6" }}>No tokens</div>
-            ) : (
-              sortedInitiativeOrder.map((tokenId) => {
-                const token = tokens.find((item) => item.id === tokenId);
-                if (!token) return null;
-                const initiative = initiativeById[token.id];
-                const isActive = token.id === activeInitiativeTokenId;
-
-                return (
-                  <div
-                    key={token.id}
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "center",
-                      gap: 8,
-                      padding: "7px 9px",
-                      fontSize: 13,
-                      background: isActive ? "rgba(255,240,122,0.22)" : "transparent",
-                      borderTop: "1px solid rgba(255,255,255,0.06)",
-                    }}
-                  >
-                    <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+            <div style={sidePanelStyle}>
+              <div style={{ fontSize: 15, fontWeight: 700 }}>Entities</div>
+              <button type="button" onClick={handleAddEntity} style={trackerButtonStyle}>
+                Add Entity
+              </button>
+              <div
+                style={{
+                  border: "1px solid #3a3a3a",
+                  borderRadius: 8,
+                  overflowY: "auto",
+                  maxHeight: 240,
+                }}
+              >
+                {tokens.length === 0 ? (
+                  <div style={{ padding: 10, fontSize: 13, color: "#b6b6b6" }}>No entities</div>
+                ) : (
+                  tokens.map((token) => (
+                    <div
+                      key={token.id}
+                      style={{
+                        padding: "7px 9px",
+                        fontSize: 13,
+                        borderTop: "1px solid rgba(255,255,255,0.06)",
+                        whiteSpace: "nowrap",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                      }}
+                      title={token.name}
+                    >
                       {token.name}
-                    </span>
-                    <span style={{ minWidth: 24, textAlign: "right", fontWeight: 700 }}>
-                      {typeof initiative === "number" ? initiative : "-"}
-                    </span>
-                  </div>
-                );
-              })
-            )}
-          </div>
-        </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
 
-        <button
-          type="button"
-          onClick={() => setInitiativeOpen((open) => !open)}
-          style={{
-            width: 88,
-            border: "1px solid #4a4a4a",
-            borderRadius: 8,
-            background: "rgba(18,18,18,0.94)",
-            color: "#f2f2f2",
-            fontSize: 12,
-            padding: "10px 8px",
-            cursor: "pointer",
-            userSelect: "none",
-          }}
-        >
-          {initiativeOpen ? "Hide" : "Initiative"}
-        </button>
-      </div>
+            <button type="button" onClick={() => setEntitiesOpen((open) => !open)} style={panelToggleButtonStyle}>
+              {entitiesOpen ? "Hide" : "Entities"}
+            </button>
+          </div>
+
+          {placingAsset && (
+            <div
+              style={{
+                position: "fixed",
+                top: settingsOpen ? 124 : 56,
+                left: "50%",
+                transform: "translateX(-50%)",
+                zIndex: 1010,
+                border: "1px solid #3a3a3a",
+                borderRadius: 8,
+                padding: "8px 9px",
+                background: "rgba(18,18,18,0.95)",
+                color: "#d8e6ff",
+                fontSize: 12,
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                gap: 8,
+                width: "min(320px, calc(100vw - 24px))",
+                fontFamily: "sans-serif",
+              }}
+            >
+              <span
+                title={placingAsset.name}
+                style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+              >
+                Placing: {placingAsset.name}
+              </span>
+              <button
+                type="button"
+                onClick={() => setPlacingAsset(null)}
+                style={{ ...trackerButtonStyle, padding: "3px 7px", fontSize: 11 }}
+              >
+                Cancel
+              </button>
+            </div>
+          )}
+        </>
+      )}
 
       {contextMenu && (
         <div
@@ -521,23 +435,36 @@ export default function App() {
             onClick={() => dispatchTokenAction({ type: "delete", tokenId: contextMenu.tokenId })}
             style={menuButtonStyle}
           >
-            Delete token
+            Delete entity
           </button>
           <button
             type="button"
             onClick={() => dispatchTokenAction({ type: "duplicate", tokenId: contextMenu.tokenId })}
             style={menuButtonStyle}
           >
-            Duplicate token
+            Duplicate entity
           </button>
-          <button type="button" onClick={() => handleRenameToken(contextMenu.tokenId)} style={menuButtonStyle}>
-            Rename token
+          <button type="button" onClick={() => handleRenameEntity(contextMenu.tokenId)} style={menuButtonStyle}>
+            Rename entity
           </button>
-          <button type="button" onClick={() => handleSetTokenHp(contextMenu.tokenId)} style={menuButtonStyle}>
+          <button type="button" onClick={() => handleSetEntityHp(contextMenu.tokenId)} style={menuButtonStyle}>
             Set HP
           </button>
         </div>
       )}
+
+      <div
+        style={{
+          position: "fixed",
+          top: 12,
+          left: 12,
+          zIndex: 1110,
+        }}
+      >
+        <button type="button" onClick={() => setMode("home")} style={trackerButtonStyle}>
+          Home
+        </button>
+      </div>
 
       <div
         style={{
@@ -630,4 +557,41 @@ const trackerButtonStyle: CSSProperties = {
   fontSize: 12,
   padding: "6px 8px",
   cursor: "pointer",
+};
+
+const homeButtonStyle: CSSProperties = {
+  border: "1px solid #49526a",
+  borderRadius: 10,
+  background: "rgba(24,28,37,0.95)",
+  color: "#f2f2f2",
+  fontSize: 16,
+  fontWeight: 600,
+  padding: "12px 16px",
+  cursor: "pointer",
+  minWidth: 170,
+};
+
+const panelToggleButtonStyle: CSSProperties = {
+  width: 88,
+  border: "1px solid #4a4a4a",
+  borderRadius: 8,
+  background: "rgba(18,18,18,0.94)",
+  color: "#f2f2f2",
+  fontSize: 12,
+  padding: "10px 8px",
+  cursor: "pointer",
+  userSelect: "none",
+};
+
+const sidePanelStyle: CSSProperties = {
+  width: 260,
+  border: "1px solid #4a4a4a",
+  borderRadius: 10,
+  background: "rgba(18,18,18,0.95)",
+  color: "#f2f2f2",
+  padding: 10,
+  display: "grid",
+  gridAutoFlow: "row",
+  gap: 10,
+  fontFamily: "sans-serif",
 };
