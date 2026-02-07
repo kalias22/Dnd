@@ -1,5 +1,5 @@
-import { type CSSProperties, useEffect, useRef, useState } from "react";
-import Tabletop, { type TokenContextAction } from "./components/Tabletop";
+import { type CSSProperties, useEffect, useMemo, useRef, useState } from "react";
+import Tabletop, { type TokenContextAction, type TokenSummary } from "./components/Tabletop";
 
 type ContextActionInput =
   | { type: "delete"; tokenId: string }
@@ -7,13 +7,44 @@ type ContextActionInput =
   | { type: "rename"; tokenId: string; name: string }
   | { type: "setHp"; tokenId: string; hpCurrent: number; hpMax: number };
 
+const mergeOrderWithTokens = (previousOrder: string[], tokens: TokenSummary[]) => {
+  const tokenIds = tokens.map((token) => token.id);
+  const tokenIdSet = new Set(tokenIds);
+  const kept = previousOrder.filter((tokenId) => tokenIdSet.has(tokenId));
+  const keptSet = new Set(kept);
+  const appended = tokenIds.filter((tokenId) => !keptSet.has(tokenId));
+  return [...kept, ...appended];
+};
+
+const sortOrderByInitiativeDesc = (order: string[], initiatives: Record<string, number>) => {
+  return [...order].sort((a, b) => {
+    const aValue = initiatives[a];
+    const bValue = initiatives[b];
+    if (typeof aValue === "number" && typeof bValue === "number") {
+      return bValue - aValue;
+    }
+    if (typeof aValue === "number") return -1;
+    if (typeof bValue === "number") return 1;
+    return 0;
+  });
+};
+
 export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [snapToGrid, setSnapToGrid] = useState(true);
+  const [initiativeOpen, setInitiativeOpen] = useState(true);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; tokenId: string } | null>(null);
   const [contextAction, setContextAction] = useState<TokenContextAction | null>(null);
+  const [tokens, setTokens] = useState<TokenSummary[]>([]);
+  const [initiativeById, setInitiativeById] = useState<Record<string, number>>({});
+  const [initiativeOrder, setInitiativeOrder] = useState<string[]>([]);
+  const [activeInitiativeTokenId, setActiveInitiativeTokenId] = useState<string | null>(null);
   const actionNonceRef = useRef(1);
   const contextMenuRef = useRef<HTMLDivElement | null>(null);
+  const sortedInitiativeOrder = useMemo(
+    () => sortOrderByInitiativeDesc(mergeOrderWithTokens(initiativeOrder, tokens), initiativeById),
+    [initiativeOrder, initiativeById, tokens]
+  );
 
   const closeContextMenu = () => {
     setContextMenu(null);
@@ -40,11 +71,33 @@ export default function App() {
     };
 
     window.addEventListener("pointerdown", handleOutsidePointerDown);
-
     return () => {
       window.removeEventListener("pointerdown", handleOutsidePointerDown);
     };
   }, [contextMenu]);
+
+  useEffect(() => {
+    const tokenIds = tokens.map((token) => token.id);
+    const tokenIdSet = new Set(tokenIds);
+
+    setInitiativeById((previous) => {
+      const next: Record<string, number> = {};
+      for (const tokenId of tokenIds) {
+        const value = previous[tokenId];
+        if (typeof value === "number") {
+          next[tokenId] = value;
+        }
+      }
+      return next;
+    });
+
+    setInitiativeOrder((previous) => mergeOrderWithTokens(previous, tokens));
+
+    setActiveInitiativeTokenId((previous) => {
+      if (!previous || !tokenIdSet.has(previous)) return null;
+      return previous;
+    });
+  }, [tokens]);
 
   const handleRenameToken = (tokenId: string) => {
     const nextName = window.prompt("Rename token:");
@@ -69,14 +122,152 @@ export default function App() {
     dispatchTokenAction({ type: "setHp", tokenId, hpCurrent, hpMax });
   };
 
+  const rollAllInitiative = () => {
+    const rolled: Record<string, number> = {};
+    for (const token of tokens) {
+      rolled[token.id] = Math.floor(Math.random() * 20) + 1;
+    }
+
+    setInitiativeById(rolled);
+    setInitiativeOrder((previous) => sortOrderByInitiativeDesc(mergeOrderWithTokens(previous, tokens), rolled));
+  };
+
+  const nextInitiativeTurn = () => {
+    if (sortedInitiativeOrder.length === 0) {
+      setActiveInitiativeTokenId(null);
+      return;
+    }
+
+    setInitiativeOrder(sortedInitiativeOrder);
+    setActiveInitiativeTokenId((current) => {
+      if (!current) return sortedInitiativeOrder[0];
+      const currentIndex = sortedInitiativeOrder.indexOf(current);
+      if (currentIndex < 0) return sortedInitiativeOrder[0];
+      return sortedInitiativeOrder[(currentIndex + 1) % sortedInitiativeOrder.length];
+    });
+  };
+
+  const clearInitiativeTracker = () => {
+    setInitiativeById({});
+    setInitiativeOrder([]);
+    setActiveInitiativeTokenId(null);
+  };
+
   return (
     <div style={{ position: "fixed", inset: 0 }}>
       <Tabletop
         snapToGrid={snapToGrid}
         contextAction={contextAction}
+        onTokensChange={setTokens}
         onTokenContextMenu={(tokenId, x, y) => setContextMenu({ tokenId, x, y })}
         onRequestCloseContextMenu={closeContextMenu}
       />
+
+      <div
+        style={{
+          position: "fixed",
+          top: 12,
+          left: 12,
+          zIndex: 1100,
+          width: 354,
+          display: "flex",
+          alignItems: "flex-start",
+          gap: 6,
+          transform: initiativeOpen ? "translateX(0)" : "translateX(-266px)",
+          transition: "transform 160ms ease",
+        }}
+      >
+        <div
+          style={{
+            width: 260,
+            border: "1px solid #4a4a4a",
+            borderRadius: 10,
+            background: "rgba(18,18,18,0.94)",
+            color: "#f2f2f2",
+            padding: 10,
+            display: "flex",
+            flexDirection: "column",
+            gap: 8,
+            fontFamily: "sans-serif",
+          }}
+        >
+          <div style={{ fontSize: 15, fontWeight: 700 }}>Initiative</div>
+
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            <button type="button" onClick={rollAllInitiative} style={trackerButtonStyle}>
+              Roll All
+            </button>
+            <button type="button" onClick={nextInitiativeTurn} style={trackerButtonStyle}>
+              Next
+            </button>
+            <button type="button" onClick={clearInitiativeTracker} style={trackerButtonStyle}>
+              Clear
+            </button>
+          </div>
+
+          <div
+            style={{
+              border: "1px solid #3a3a3a",
+              borderRadius: 8,
+              overflow: "hidden",
+              maxHeight: 240,
+              overflowY: "auto",
+            }}
+          >
+            {sortedInitiativeOrder.length === 0 ? (
+              <div style={{ padding: 10, fontSize: 13, color: "#b6b6b6" }}>No tokens</div>
+            ) : (
+              sortedInitiativeOrder.map((tokenId) => {
+                const token = tokens.find((item) => item.id === tokenId);
+                if (!token) return null;
+                const initiative = initiativeById[token.id];
+                const isActive = token.id === activeInitiativeTokenId;
+
+                return (
+                  <div
+                    key={token.id}
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      gap: 8,
+                      padding: "7px 9px",
+                      fontSize: 13,
+                      background: isActive ? "rgba(255,240,122,0.22)" : "transparent",
+                      borderTop: "1px solid rgba(255,255,255,0.06)",
+                    }}
+                  >
+                    <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                      {token.name}
+                    </span>
+                    <span style={{ minWidth: 24, textAlign: "right", fontWeight: 700 }}>
+                      {typeof initiative === "number" ? initiative : "-"}
+                    </span>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => setInitiativeOpen((open) => !open)}
+          style={{
+            width: 88,
+            border: "1px solid #4a4a4a",
+            borderRadius: 8,
+            background: "rgba(18,18,18,0.94)",
+            color: "#f2f2f2",
+            fontSize: 12,
+            padding: "10px 8px",
+            cursor: "pointer",
+            userSelect: "none",
+          }}
+        >
+          {initiativeOpen ? "Hide" : "Initiative"}
+        </button>
+      </div>
 
       {contextMenu && (
         <div
@@ -205,3 +396,12 @@ const menuButtonStyle: CSSProperties = {
   cursor: "pointer",
 };
 
+const trackerButtonStyle: CSSProperties = {
+  border: "1px solid #3f3f3f",
+  borderRadius: 6,
+  background: "rgba(28,28,28,0.95)",
+  color: "#f2f2f2",
+  fontSize: 12,
+  padding: "6px 8px",
+  cursor: "pointer",
+};

@@ -41,9 +41,15 @@ export type TokenContextAction =
   | { nonce: number; type: "rename"; tokenId: string; name: string }
   | { nonce: number; type: "setHp"; tokenId: string; hpCurrent: number; hpMax: number };
 
+export type TokenSummary = {
+  id: string;
+  name: string;
+};
+
 type TabletopProps = {
   snapToGrid?: boolean;
   contextAction?: TokenContextAction | null;
+  onTokensChange?: (tokens: TokenSummary[]) => void;
   onTokenContextMenu?: (tokenId: string, screenX: number, screenY: number) => void;
   onRequestCloseContextMenu?: () => void;
 };
@@ -51,11 +57,13 @@ type TabletopProps = {
 export default function Tabletop({
   snapToGrid = true,
   contextAction = null,
+  onTokensChange,
   onTokenContextMenu,
   onRequestCloseContextMenu,
 }: TabletopProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const snapToGridRef = useRef(snapToGrid);
+  const onTokensChangeRef = useRef(onTokensChange);
   const onTokenContextMenuRef = useRef(onTokenContextMenu);
   const onRequestCloseContextMenuRef = useRef(onRequestCloseContextMenu);
   const runContextActionRef = useRef<((action: TokenContextAction) => void) | null>(null);
@@ -67,6 +75,10 @@ export default function Tabletop({
   useEffect(() => {
     onTokenContextMenuRef.current = onTokenContextMenu;
   }, [onTokenContextMenu]);
+
+  useEffect(() => {
+    onTokensChangeRef.current = onTokensChange;
+  }, [onTokensChange]);
 
   useEffect(() => {
     onRequestCloseContextMenuRef.current = onRequestCloseContextMenu;
@@ -89,6 +101,14 @@ export default function Tabletop({
     let rebindInteractionHandlers: (() => void) | null = null;
 
     const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
+    const emitTokensChange = () => {
+      onTokensChangeRef.current?.(
+        tokenRecords.map((token) => ({
+          id: token.id,
+          name: token.name,
+        }))
+      );
+    };
 
     const drawToken = (token: TokenRecord, selected: boolean) => {
       token.body.clear();
@@ -283,6 +303,7 @@ export default function Tabletop({
       selectedTokenIds.delete(tokenId);
       refreshTokenStyles();
       rebindInteractionHandlers?.();
+      emitTokensChange();
     };
 
     const duplicateTokenById = (tokenId: string) => {
@@ -312,6 +333,7 @@ export default function Tabletop({
       if (duplicate) {
         setSelection([duplicate.id]);
         rebindInteractionHandlers?.();
+        emitTokensChange();
       }
     };
 
@@ -320,6 +342,7 @@ export default function Tabletop({
       if (!token) return;
       token.name = name;
       drawToken(token, selectedTokenIds.has(token.id));
+      emitTokensChange();
     };
 
     const setTokenHp = (tokenId: string, hpCurrent: number, hpMax: number) => {
@@ -692,6 +715,7 @@ export default function Tabletop({
       for (const token of TOKEN_DEFINITIONS) {
         createTokenRecord(token);
       }
+      emitTokensChange();
 
       selectionOverlay = new Graphics();
       nextApp.stage.addChild(selectionOverlay);
