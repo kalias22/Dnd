@@ -7,11 +7,19 @@ const ORIGIN_MARKER_THICKNESS = 3;
 const MIN_ZOOM = 0.25;
 const MAX_ZOOM = 3;
 const ZOOM_SENSITIVITY = 0.0015;
+const SELECTION_DRAG_THRESHOLD = 3;
 const TOKEN_DEFINITIONS = [
   { id: "token-1", x: 200, y: 200, radius: 18, color: 0xd35400 },
   { id: "token-2", x: 320, y: 260, radius: 16, color: 0x1abc9c },
   { id: "token-3", x: 420, y: 140, radius: 20, color: 0x3498db },
 ];
+
+type TokenRecord = {
+  id: string;
+  radius: number;
+  color: number;
+  graphic: Graphics;
+};
 
 export default function Tabletop() {
   const hostRef = useRef<HTMLDivElement>(null);
@@ -25,10 +33,50 @@ export default function Tabletop() {
     let world: Container | null = null;
     let grid: Graphics | null = null;
     let originMarker: Graphics | null = null;
-    let tokenGraphics: Graphics[] = [];
+    let selectionOverlay: Graphics | null = null;
+    let tokenRecords: TokenRecord[] = [];
+    let selectedTokenIds = new Set<string>();
     let detachInteractions: (() => void) | null = null;
 
     const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
+
+    const drawToken = (token: TokenRecord, selected: boolean) => {
+      token.graphic.clear();
+      token.graphic.circle(0, 0, token.radius).fill({ color: token.color, alpha: 1 });
+      if (selected) {
+        token.graphic.setStrokeStyle({ width: 3, color: 0xfff07a, alpha: 1 });
+        token.graphic.circle(0, 0, token.radius + 4).stroke();
+      }
+    };
+
+    const refreshTokenStyles = () => {
+      for (const token of tokenRecords) {
+        drawToken(token, selectedTokenIds.has(token.id));
+      }
+    };
+
+    const setSelection = (ids: string[]) => {
+      selectedTokenIds = new Set(ids);
+      refreshTokenStyles();
+    };
+
+    const drawSelectionRect = (x0: number, y0: number, x1: number, y1: number) => {
+      if (!selectionOverlay) return;
+
+      const left = Math.min(x0, x1);
+      const top = Math.min(y0, y1);
+      const width = Math.abs(x1 - x0);
+      const height = Math.abs(y1 - y0);
+
+      selectionOverlay.clear();
+      selectionOverlay.rect(left, top, width, height).fill({ color: 0x8ec5ff, alpha: 0.18 });
+      selectionOverlay.setStrokeStyle({ width: 1.5, color: 0xb7d9ff, alpha: 1 });
+      selectionOverlay.rect(left, top, width, height).stroke();
+    };
+
+    const clearSelectionRect = () => {
+      if (selectionOverlay) selectionOverlay.clear();
+    };
 
     const drawGrid = () => {
       if (!app || !grid || !world) return;
@@ -66,25 +114,51 @@ export default function Tabletop() {
       });
     };
 
-    const setupInteractions = (canvas: HTMLCanvasElement, stage: Container, tokens: Graphics[]) => {
+    const setupInteractions = (canvas: HTMLCanvasElement, stage: Container, tokens: TokenRecord[]) => {
       let panning = false;
       let panPointerId: number | null = null;
       let lastPanX = 0;
       let lastPanY = 0;
 
-      let draggingToken: Graphics | null = null;
+      let selecting = false;
+      let selectionPointerId: number | null = null;
+      let selectionStartX = 0;
+      let selectionStartY = 0;
+      let selectionCurrentX = 0;
+      let selectionCurrentY = 0;
+      let selectionMoved = false;
+
+      let draggingToken: TokenRecord | null = null;
       let tokenPointerId: number | null = null;
       let tokenOffsetX = 0;
       let tokenOffsetY = 0;
+      let tokenDownX = 0;
+      let tokenDownY = 0;
+      let tokenDragMoved = false;
 
       const onStagePointerDown = (event: any) => {
-        if (!world || event.button !== 0) return;
+        if (!world) return;
 
-        panning = true;
-        panPointerId = event.pointerId;
-        lastPanX = event.global.x;
-        lastPanY = event.global.y;
-        canvas.style.cursor = "grabbing";
+        if (event.button === 1) {
+          event.nativeEvent?.preventDefault?.();
+          panning = true;
+          panPointerId = event.pointerId;
+          lastPanX = event.global.x;
+          lastPanY = event.global.y;
+          canvas.style.cursor = "grabbing";
+          return;
+        }
+
+        if (event.button !== 0) return;
+
+        selecting = true;
+        selectionPointerId = event.pointerId;
+        selectionStartX = event.global.x;
+        selectionStartY = event.global.y;
+        selectionCurrentX = selectionStartX;
+        selectionCurrentY = selectionStartY;
+        selectionMoved = false;
+        drawSelectionRect(selectionStartX, selectionStartY, selectionCurrentX, selectionCurrentY);
       };
 
       const onStagePointerMove = (event: any) => {
@@ -99,9 +173,27 @@ export default function Tabletop() {
           lastPanY = event.global.y;
         }
 
+        if (selecting && event.pointerId === selectionPointerId) {
+          selectionCurrentX = event.global.x;
+          selectionCurrentY = event.global.y;
+          if (
+            Math.abs(selectionCurrentX - selectionStartX) > SELECTION_DRAG_THRESHOLD ||
+            Math.abs(selectionCurrentY - selectionStartY) > SELECTION_DRAG_THRESHOLD
+          ) {
+            selectionMoved = true;
+          }
+          drawSelectionRect(selectionStartX, selectionStartY, selectionCurrentX, selectionCurrentY);
+        }
+
         if (draggingToken && event.pointerId === tokenPointerId) {
           const local = world.toLocal(event.global);
-          draggingToken.position.set(local.x + tokenOffsetX, local.y + tokenOffsetY);
+          draggingToken.graphic.position.set(local.x + tokenOffsetX, local.y + tokenOffsetY);
+          if (
+            Math.abs(event.global.x - tokenDownX) > SELECTION_DRAG_THRESHOLD ||
+            Math.abs(event.global.y - tokenDownY) > SELECTION_DRAG_THRESHOLD
+          ) {
+            tokenDragMoved = true;
+          }
         }
       };
 
@@ -110,6 +202,30 @@ export default function Tabletop() {
           panning = false;
           panPointerId = null;
           canvas.style.cursor = "grab";
+        }
+
+        if (selecting && event.pointerId === selectionPointerId) {
+          if (!selectionMoved) {
+            setSelection([]);
+          } else if (world) {
+            const left = Math.min(selectionStartX, selectionCurrentX);
+            const right = Math.max(selectionStartX, selectionCurrentX);
+            const top = Math.min(selectionStartY, selectionCurrentY);
+            const bottom = Math.max(selectionStartY, selectionCurrentY);
+
+            const selectedIds = tokens
+              .filter((token) => {
+                const center = world.toGlobal(token.graphic.position);
+                return center.x >= left && center.x <= right && center.y >= top && center.y <= bottom;
+              })
+              .map((token) => token.id);
+
+            setSelection(selectedIds);
+          }
+
+          selecting = false;
+          selectionPointerId = null;
+          clearSelectionRect();
         }
 
         if (draggingToken && event.pointerId === tokenPointerId) {
@@ -151,16 +267,19 @@ export default function Tabletop() {
       stage.on("pointerupoutside", onStagePointerUp);
 
       const removeTokenListeners: Array<() => void> = [];
-      for (const tokenGraphic of tokens) {
+      for (const token of tokens) {
         const onTokenPointerDown = (event: any) => {
           if (!world || event.button !== 0) return;
 
           event.stopPropagation();
-          draggingToken = tokenGraphic;
+          draggingToken = token;
           tokenPointerId = event.pointerId;
+          tokenDownX = event.global.x;
+          tokenDownY = event.global.y;
+          tokenDragMoved = false;
           const local = world.toLocal(event.global);
-          tokenOffsetX = tokenGraphic.x - local.x;
-          tokenOffsetY = tokenGraphic.y - local.y;
+          tokenOffsetX = token.graphic.x - local.x;
+          tokenOffsetY = token.graphic.y - local.y;
           canvas.style.cursor = "grabbing";
         };
 
@@ -168,21 +287,26 @@ export default function Tabletop() {
           if (!draggingToken || event.pointerId !== tokenPointerId) return;
 
           event.stopPropagation();
+          const releasedToken = draggingToken;
           draggingToken = null;
           tokenPointerId = null;
           canvas.style.cursor = "grab";
+
+          if (!tokenDragMoved) {
+            setSelection([releasedToken.id]);
+          }
         };
 
-        tokenGraphic.eventMode = "static";
-        tokenGraphic.cursor = "pointer";
-        tokenGraphic.on("pointerdown", onTokenPointerDown);
-        tokenGraphic.on("pointerup", onTokenPointerUp);
-        tokenGraphic.on("pointerupoutside", onTokenPointerUp);
+        token.graphic.eventMode = "static";
+        token.graphic.cursor = "pointer";
+        token.graphic.on("pointerdown", onTokenPointerDown);
+        token.graphic.on("pointerup", onTokenPointerUp);
+        token.graphic.on("pointerupoutside", onTokenPointerUp);
 
         removeTokenListeners.push(() => {
-          tokenGraphic.off("pointerdown", onTokenPointerDown);
-          tokenGraphic.off("pointerup", onTokenPointerUp);
-          tokenGraphic.off("pointerupoutside", onTokenPointerUp);
+          token.graphic.off("pointerdown", onTokenPointerDown);
+          token.graphic.off("pointerup", onTokenPointerUp);
+          token.graphic.off("pointerupoutside", onTokenPointerUp);
         });
       }
 
@@ -235,18 +359,28 @@ export default function Tabletop() {
 
       grid = new Graphics();
       world.addChild(grid);
+
       originMarker = new Graphics();
       world.addChild(originMarker);
-      tokenGraphics = TOKEN_DEFINITIONS.map((token) => {
+
+      tokenRecords = TOKEN_DEFINITIONS.map((token) => {
         const tokenGraphic = new Graphics();
         tokenGraphic.label = token.id;
-        tokenGraphic.circle(0, 0, token.radius).fill({ color: token.color, alpha: 1 });
         tokenGraphic.position.set(token.x, token.y);
         world!.addChild(tokenGraphic);
-        return tokenGraphic;
+        return {
+          id: token.id,
+          radius: token.radius,
+          color: token.color,
+          graphic: tokenGraphic,
+        };
       });
 
-      detachInteractions = setupInteractions(canvas, nextApp.stage, tokenGraphics);
+      selectionOverlay = new Graphics();
+      nextApp.stage.addChild(selectionOverlay);
+
+      setSelection([]);
+      detachInteractions = setupInteractions(canvas, nextApp.stage, tokenRecords);
 
       onResize();
       window.addEventListener("resize", onResize);
