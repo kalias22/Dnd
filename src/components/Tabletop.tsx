@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { Application, Container, Graphics } from "pixi.js";
+import { Application, Container, Graphics, Rectangle } from "pixi.js";
 
 const GRID_CELL_SIZE = 50;
 const ORIGIN_MARKER_SIZE = 22;
@@ -7,6 +7,9 @@ const ORIGIN_MARKER_THICKNESS = 3;
 const MIN_ZOOM = 0.25;
 const MAX_ZOOM = 3;
 const ZOOM_SENSITIVITY = 0.0015;
+const TOKEN_RADIUS = 18;
+const TOKEN_X = 200;
+const TOKEN_Y = 200;
 
 export default function Tabletop() {
   const hostRef = useRef<HTMLDivElement>(null);
@@ -20,6 +23,7 @@ export default function Tabletop() {
     let world: Container | null = null;
     let grid: Graphics | null = null;
     let originMarker: Graphics | null = null;
+    let token: Graphics | null = null;
     let detachInteractions: (() => void) | null = null;
 
     const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
@@ -60,43 +64,77 @@ export default function Tabletop() {
       });
     };
 
-    const setupInteractions = (canvas: HTMLCanvasElement) => {
-      let dragging = false;
-      let activePointerId: number | null = null;
-      let lastX = 0;
-      let lastY = 0;
+    const setupInteractions = (canvas: HTMLCanvasElement, stage: Container) => {
+      let panning = false;
+      let panPointerId: number | null = null;
+      let lastPanX = 0;
+      let lastPanY = 0;
 
-      const onPointerDown = (event: PointerEvent) => {
+      let draggingToken = false;
+      let tokenPointerId: number | null = null;
+      let tokenOffsetX = 0;
+      let tokenOffsetY = 0;
+
+      const onStagePointerDown = (event: any) => {
         if (!world || event.button !== 0) return;
 
-        dragging = true;
-        activePointerId = event.pointerId;
-        lastX = event.clientX;
-        lastY = event.clientY;
+        panning = true;
+        panPointerId = event.pointerId;
+        lastPanX = event.global.x;
+        lastPanY = event.global.y;
         canvas.style.cursor = "grabbing";
-        canvas.setPointerCapture(event.pointerId);
       };
 
-      const onPointerMove = (event: PointerEvent) => {
-        if (!world || !dragging || event.pointerId !== activePointerId) return;
+      const onStagePointerMove = (event: any) => {
+        if (!world) return;
 
-        const deltaX = event.clientX - lastX;
-        const deltaY = event.clientY - lastY;
-        world.position.x += deltaX;
-        world.position.y += deltaY;
-        lastX = event.clientX;
-        lastY = event.clientY;
-      };
-
-      const endDrag = (event: PointerEvent) => {
-        if (event.pointerId !== activePointerId) return;
-
-        dragging = false;
-        activePointerId = null;
-        canvas.style.cursor = "grab";
-        if (canvas.hasPointerCapture(event.pointerId)) {
-          canvas.releasePointerCapture(event.pointerId);
+        if (panning && event.pointerId === panPointerId) {
+          const deltaX = event.global.x - lastPanX;
+          const deltaY = event.global.y - lastPanY;
+          world.position.x += deltaX;
+          world.position.y += deltaY;
+          lastPanX = event.global.x;
+          lastPanY = event.global.y;
         }
+
+        if (draggingToken && token && event.pointerId === tokenPointerId) {
+          const local = world.toLocal(event.global);
+          token.position.set(local.x + tokenOffsetX, local.y + tokenOffsetY);
+        }
+      };
+
+      const onStagePointerUp = (event: any) => {
+        if (panning && event.pointerId === panPointerId) {
+          panning = false;
+          panPointerId = null;
+          canvas.style.cursor = "grab";
+        }
+
+        if (draggingToken && event.pointerId === tokenPointerId) {
+          draggingToken = false;
+          tokenPointerId = null;
+          canvas.style.cursor = "grab";
+        }
+      };
+
+      const onTokenPointerDown = (event: any) => {
+        if (!world || !token || event.button !== 0) return;
+
+        event.stopPropagation();
+        draggingToken = true;
+        tokenPointerId = event.pointerId;
+        const local = world.toLocal(event.global);
+        tokenOffsetX = token.x - local.x;
+        tokenOffsetY = token.y - local.y;
+        canvas.style.cursor = "grabbing";
+      };
+
+      const onTokenPointerUp = (event: any) => {
+        if (!draggingToken || event.pointerId !== tokenPointerId) return;
+        event.stopPropagation();
+        draggingToken = false;
+        tokenPointerId = null;
+        canvas.style.cursor = "grab";
       };
 
       const onWheel = (event: WheelEvent) => {
@@ -123,24 +161,41 @@ export default function Tabletop() {
       canvas.style.cursor = "grab";
       canvas.style.touchAction = "none";
 
-      canvas.addEventListener("pointerdown", onPointerDown);
-      canvas.addEventListener("pointermove", onPointerMove);
-      canvas.addEventListener("pointerup", endDrag);
-      canvas.addEventListener("pointercancel", endDrag);
-      canvas.addEventListener("lostpointercapture", endDrag);
+      stage.eventMode = "static";
+      stage.hitArea = new Rectangle(0, 0, canvas.clientWidth, canvas.clientHeight);
+      stage.on("pointerdown", onStagePointerDown);
+      stage.on("pointermove", onStagePointerMove);
+      stage.on("pointerup", onStagePointerUp);
+      stage.on("pointerupoutside", onStagePointerUp);
+
+      if (token) {
+        token.eventMode = "static";
+        token.cursor = "pointer";
+        token.on("pointerdown", onTokenPointerDown);
+        token.on("pointerup", onTokenPointerUp);
+        token.on("pointerupoutside", onTokenPointerUp);
+      }
+
       canvas.addEventListener("wheel", onWheel, { passive: false });
 
       return () => {
-        canvas.removeEventListener("pointerdown", onPointerDown);
-        canvas.removeEventListener("pointermove", onPointerMove);
-        canvas.removeEventListener("pointerup", endDrag);
-        canvas.removeEventListener("pointercancel", endDrag);
-        canvas.removeEventListener("lostpointercapture", endDrag);
+        stage.off("pointerdown", onStagePointerDown);
+        stage.off("pointermove", onStagePointerMove);
+        stage.off("pointerup", onStagePointerUp);
+        stage.off("pointerupoutside", onStagePointerUp);
+        if (token) {
+          token.off("pointerdown", onTokenPointerDown);
+          token.off("pointerup", onTokenPointerUp);
+          token.off("pointerupoutside", onTokenPointerUp);
+        }
         canvas.removeEventListener("wheel", onWheel);
       };
     };
 
     const onResize = () => {
+      if (app) {
+        app.stage.hitArea = new Rectangle(0, 0, app.screen.width, app.screen.height);
+      }
       drawGrid();
       drawOriginMarker();
     };
@@ -176,8 +231,12 @@ export default function Tabletop() {
       world.addChild(grid);
       originMarker = new Graphics();
       world.addChild(originMarker);
+      token = new Graphics();
+      token.circle(0, 0, TOKEN_RADIUS).fill({ color: 0xd35400, alpha: 1 });
+      token.position.set(TOKEN_X, TOKEN_Y);
+      world.addChild(token);
 
-      detachInteractions = setupInteractions(canvas);
+      detachInteractions = setupInteractions(canvas, nextApp.stage);
 
       onResize();
       window.addEventListener("resize", onResize);
