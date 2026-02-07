@@ -35,17 +35,42 @@ type TokenRecord = {
   scale: number;
 };
 
+export type TokenContextAction =
+  | { nonce: number; type: "delete"; tokenId: string }
+  | { nonce: number; type: "duplicate"; tokenId: string }
+  | { nonce: number; type: "rename"; tokenId: string; name: string }
+  | { nonce: number; type: "setHp"; tokenId: string; hpCurrent: number; hpMax: number };
+
 type TabletopProps = {
   snapToGrid?: boolean;
+  contextAction?: TokenContextAction | null;
+  onTokenContextMenu?: (tokenId: string, screenX: number, screenY: number) => void;
+  onRequestCloseContextMenu?: () => void;
 };
 
-export default function Tabletop({ snapToGrid = true }: TabletopProps) {
+export default function Tabletop({
+  snapToGrid = true,
+  contextAction = null,
+  onTokenContextMenu,
+  onRequestCloseContextMenu,
+}: TabletopProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const snapToGridRef = useRef(snapToGrid);
+  const onTokenContextMenuRef = useRef(onTokenContextMenu);
+  const onRequestCloseContextMenuRef = useRef(onRequestCloseContextMenu);
+  const runContextActionRef = useRef<((action: TokenContextAction) => void) | null>(null);
 
   useEffect(() => {
     snapToGridRef.current = snapToGrid;
   }, [snapToGrid]);
+
+  useEffect(() => {
+    onTokenContextMenuRef.current = onTokenContextMenu;
+  }, [onTokenContextMenu]);
+
+  useEffect(() => {
+    onRequestCloseContextMenuRef.current = onRequestCloseContextMenu;
+  }, [onRequestCloseContextMenu]);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -61,6 +86,7 @@ export default function Tabletop({ snapToGrid = true }: TabletopProps) {
     let selectedTokenIds = new Set<string>();
     let detachInteractions: (() => void) | null = null;
     let detachKeyboard: (() => void) | null = null;
+    let rebindInteractionHandlers: (() => void) | null = null;
 
     const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 
@@ -189,6 +215,143 @@ export default function Tabletop({ snapToGrid = true }: TabletopProps) {
       );
     };
 
+    const createTokenRecord = (token: {
+      id: string;
+      name: string;
+      x: number;
+      y: number;
+      radius: number;
+      color: number;
+      hpCurrent: number;
+      hpMax: number;
+      rotationDeg?: number;
+      scale?: number;
+    }) => {
+      if (!world) return null;
+
+      const tokenContainer = new Container();
+      tokenContainer.label = token.id;
+      tokenContainer.position.set(token.x, token.y);
+
+      const tokenBody = new Graphics();
+      const tokenLabel = new Text({
+        text: token.name,
+        style: {
+          fill: 0xffffff,
+          fontSize: 12,
+          fontFamily: "Arial",
+          fontWeight: "600",
+        },
+      });
+      const hpBarBg = new Graphics();
+      const hpBarFill = new Graphics();
+
+      tokenContainer.addChild(tokenBody);
+      tokenContainer.addChild(tokenLabel);
+      tokenContainer.addChild(hpBarBg);
+      tokenContainer.addChild(hpBarFill);
+      world.addChild(tokenContainer);
+
+      const record: TokenRecord = {
+        id: token.id,
+        name: token.name,
+        radius: token.radius,
+        color: token.color,
+        hpCurrent: token.hpCurrent,
+        hpMax: Math.max(1, token.hpMax),
+        container: tokenContainer,
+        body: tokenBody,
+        label: tokenLabel,
+        hpBarBg,
+        hpBarFill,
+        rotationDeg: token.rotationDeg ?? 0,
+        scale: token.scale ?? 1,
+      };
+
+      tokenRecords.push(record);
+      drawToken(record, selectedTokenIds.has(record.id));
+
+      return record;
+    };
+
+    const deleteTokenById = (tokenId: string) => {
+      const index = tokenRecords.findIndex((token) => token.id === tokenId);
+      if (index < 0) return;
+
+      const [token] = tokenRecords.splice(index, 1);
+      token.container.destroy({ children: true });
+      selectedTokenIds.delete(tokenId);
+      refreshTokenStyles();
+      rebindInteractionHandlers?.();
+    };
+
+    const duplicateTokenById = (tokenId: string) => {
+      const source = tokenRecords.find((token) => token.id === tokenId);
+      if (!source) return;
+
+      let copyCounter = 1;
+      let nextId = `${source.id}-copy-${copyCounter}`;
+      while (tokenRecords.some((token) => token.id === nextId)) {
+        copyCounter += 1;
+        nextId = `${source.id}-copy-${copyCounter}`;
+      }
+
+      const duplicate = createTokenRecord({
+        id: nextId,
+        name: `${source.name} Copy`,
+        x: source.container.x + GRID_CELL_SIZE / 2,
+        y: source.container.y + GRID_CELL_SIZE / 2,
+        radius: source.radius,
+        color: source.color,
+        hpCurrent: source.hpCurrent,
+        hpMax: source.hpMax,
+        rotationDeg: source.rotationDeg,
+        scale: source.scale,
+      });
+
+      if (duplicate) {
+        setSelection([duplicate.id]);
+        rebindInteractionHandlers?.();
+      }
+    };
+
+    const renameToken = (tokenId: string, name: string) => {
+      const token = tokenRecords.find((item) => item.id === tokenId);
+      if (!token) return;
+      token.name = name;
+      drawToken(token, selectedTokenIds.has(token.id));
+    };
+
+    const setTokenHp = (tokenId: string, hpCurrent: number, hpMax: number) => {
+      const token = tokenRecords.find((item) => item.id === tokenId);
+      if (!token) return;
+
+      token.hpMax = Math.max(1, hpMax);
+      token.hpCurrent = clamp(hpCurrent, 0, token.hpMax);
+      drawToken(token, selectedTokenIds.has(token.id));
+    };
+
+    runContextActionRef.current = (action: TokenContextAction) => {
+      switch (action.type) {
+        case "delete":
+          deleteTokenById(action.tokenId);
+          break;
+        case "duplicate":
+          duplicateTokenById(action.tokenId);
+          break;
+        case "rename":
+          if (action.name.trim()) {
+            renameToken(action.tokenId, action.name.trim());
+          }
+          break;
+        case "setHp":
+          setTokenHp(action.tokenId, action.hpCurrent, action.hpMax);
+          break;
+        default:
+          break;
+      }
+    };
+
     const setupInteractions = (canvas: HTMLCanvasElement, stage: Container, tokens: TokenRecord[]) => {
       let panning = false;
       let panPointerId: number | null = null;
@@ -231,6 +394,12 @@ export default function Tabletop({ snapToGrid = true }: TabletopProps) {
 
       const onStagePointerDown = (event: any) => {
         if (!world) return;
+        onRequestCloseContextMenuRef.current?.();
+
+        if (event.button === 2) {
+          event.nativeEvent?.preventDefault?.();
+          return;
+        }
 
         if (event.button === 1) {
           event.nativeEvent?.preventDefault?.();
@@ -301,6 +470,7 @@ export default function Tabletop({ snapToGrid = true }: TabletopProps) {
           if (!selectionMoved) {
             setSelection([]);
           } else if (world) {
+            const currentWorld = world;
             const left = Math.min(selectionStartX, selectionCurrentX);
             const right = Math.max(selectionStartX, selectionCurrentX);
             const top = Math.min(selectionStartY, selectionCurrentY);
@@ -308,7 +478,7 @@ export default function Tabletop({ snapToGrid = true }: TabletopProps) {
 
             const selectedIds = tokens
               .filter((token) => {
-                const center = world.toGlobal(token.container.position);
+                const center = currentWorld.toGlobal(token.container.position);
                 return center.x >= left && center.x <= right && center.y >= top && center.y <= bottom;
               })
               .map((token) => token.id);
@@ -347,6 +517,10 @@ export default function Tabletop({ snapToGrid = true }: TabletopProps) {
         world.position.set(pointerX - worldX * newScale, pointerY - worldY * newScale);
       };
 
+      const onContextMenu = (event: MouseEvent) => {
+        event.preventDefault();
+      };
+
       canvas.style.cursor = "grab";
       canvas.style.touchAction = "none";
 
@@ -360,8 +534,22 @@ export default function Tabletop({ snapToGrid = true }: TabletopProps) {
       const removeTokenListeners: Array<() => void> = [];
       for (const token of tokens) {
         const onTokenPointerDown = (event: any) => {
-          if (!world || event.button !== 0) return;
+          if (!world) return;
 
+          if (event.button === 2) {
+            event.stopPropagation();
+            event.nativeEvent?.preventDefault?.();
+            event.nativeEvent?.stopPropagation?.();
+
+            const screenX = event.nativeEvent?.clientX ?? event.global.x;
+            const screenY = event.nativeEvent?.clientY ?? event.global.y;
+            onTokenContextMenuRef.current?.(token.id, screenX, screenY);
+            return;
+          }
+
+          if (event.button !== 0) return;
+
+          onRequestCloseContextMenuRef.current?.();
           event.stopPropagation();
           draggingToken = token;
           tokenPointerId = event.pointerId;
@@ -395,6 +583,7 @@ export default function Tabletop({ snapToGrid = true }: TabletopProps) {
       }
 
       canvas.addEventListener("wheel", onWheel, { passive: false });
+      canvas.addEventListener("contextmenu", onContextMenu);
 
       return () => {
         stage.off("pointerdown", onStagePointerDown);
@@ -403,6 +592,7 @@ export default function Tabletop({ snapToGrid = true }: TabletopProps) {
         stage.off("pointerupoutside", onStagePointerUp);
         for (const remove of removeTokenListeners) remove();
         canvas.removeEventListener("wheel", onWheel);
+        canvas.removeEventListener("contextmenu", onContextMenu);
       };
     };
 
@@ -498,52 +688,20 @@ export default function Tabletop({ snapToGrid = true }: TabletopProps) {
       originMarker = new Graphics();
       world.addChild(originMarker);
 
-      tokenRecords = TOKEN_DEFINITIONS.map((token) => {
-        const tokenContainer = new Container();
-        tokenContainer.label = token.id;
-        tokenContainer.position.set(token.x, token.y);
-
-        const tokenBody = new Graphics();
-        const tokenLabel = new Text({
-          text: token.name,
-          style: {
-            fill: 0xffffff,
-            fontSize: 12,
-            fontFamily: "Arial",
-            fontWeight: "600",
-          },
-        });
-        const hpBarBg = new Graphics();
-        const hpBarFill = new Graphics();
-
-        tokenContainer.addChild(tokenBody);
-        tokenContainer.addChild(tokenLabel);
-        tokenContainer.addChild(hpBarBg);
-        tokenContainer.addChild(hpBarFill);
-        world!.addChild(tokenContainer);
-
-        return {
-          id: token.id,
-          name: token.name,
-          radius: token.radius,
-          color: token.color,
-          hpCurrent: token.hpCurrent,
-          hpMax: token.hpMax,
-          container: tokenContainer,
-          body: tokenBody,
-          label: tokenLabel,
-          hpBarBg,
-          hpBarFill,
-          rotationDeg: 0,
-          scale: 1,
-        };
-      });
+      tokenRecords = [];
+      for (const token of TOKEN_DEFINITIONS) {
+        createTokenRecord(token);
+      }
 
       selectionOverlay = new Graphics();
       nextApp.stage.addChild(selectionOverlay);
 
       setSelection([]);
-      detachInteractions = setupInteractions(canvas, nextApp.stage, tokenRecords);
+      rebindInteractionHandlers = () => {
+        if (detachInteractions) detachInteractions();
+        detachInteractions = setupInteractions(canvas, nextApp.stage, tokenRecords);
+      };
+      rebindInteractionHandlers();
       detachKeyboard = setupKeyboardShortcuts();
 
       onResize();
@@ -557,9 +715,15 @@ export default function Tabletop({ snapToGrid = true }: TabletopProps) {
       window.removeEventListener("resize", onResize);
       if (detachInteractions) detachInteractions();
       if (detachKeyboard) detachKeyboard();
+      runContextActionRef.current = null;
       if (app) app.destroy(true, { children: true });
     };
   }, []);
+
+  useEffect(() => {
+    if (!contextAction) return;
+    runContextActionRef.current?.(contextAction);
+  }, [contextAction]);
 
   return (
     <div
