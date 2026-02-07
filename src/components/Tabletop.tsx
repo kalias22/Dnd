@@ -13,6 +13,7 @@ const TOKEN_SCALE_DOWN_FACTOR = 0.9;
 const TOKEN_SCALE_UP_FACTOR = 1.1;
 const MIN_TOKEN_SCALE = 0.25;
 const MAX_TOKEN_SCALE = 4;
+const TOKEN_MOVE_SPEED = 600;
 const TOKEN_DEFINITIONS = [
   { id: "token-1", name: "Aria", x: 200, y: 200, radius: 18, color: 0xd35400, hpCurrent: 22, hpMax: 30 },
   { id: "token-2", name: "Bram", x: 320, y: 260, radius: 16, color: 0x1abc9c, hpCurrent: 11, hpMax: 18 },
@@ -33,6 +34,9 @@ type TokenRecord = {
   hpBarFill: Graphics;
   rotationDeg: number;
   scale: number;
+  targetX: number | null;
+  targetY: number | null;
+  moving: boolean;
 };
 
 export type TokenContextAction =
@@ -94,6 +98,7 @@ export default function Tabletop({
     let grid: Graphics | null = null;
     let originMarker: Graphics | null = null;
     let selectionOverlay: Graphics | null = null;
+    let movementPreviewOverlay: Graphics | null = null;
     let tokenRecords: TokenRecord[] = [];
     let selectedTokenIds = new Set<string>();
     let detachInteractions: (() => void) | null = null;
@@ -178,6 +183,33 @@ export default function Tabletop({
       if (selectionOverlay) selectionOverlay.clear();
     };
 
+    const clearMovementPreview = () => {
+      if (movementPreviewOverlay) movementPreviewOverlay.clear();
+    };
+
+    const drawMovementPreview = (
+      token: TokenRecord,
+      startX: number,
+      startY: number,
+      previewX: number,
+      previewY: number
+    ) => {
+      if (!movementPreviewOverlay) return;
+
+      const previewRadius = token.radius * token.scale;
+      movementPreviewOverlay.clear();
+      movementPreviewOverlay.setStrokeStyle({ width: 2, color: 0xc8dcff, alpha: 0.9 });
+      movementPreviewOverlay.moveTo(startX, startY);
+      movementPreviewOverlay.lineTo(previewX, previewY);
+      movementPreviewOverlay.stroke();
+      movementPreviewOverlay.circle(previewX, previewY, previewRadius).fill({
+        color: token.color,
+        alpha: 0.38,
+      });
+      movementPreviewOverlay.setStrokeStyle({ width: 1.5, color: 0xe8f0ff, alpha: 0.9 });
+      movementPreviewOverlay.circle(previewX, previewY, previewRadius).stroke();
+    };
+
     const drawGrid = () => {
       if (!app || !grid || !world) return;
 
@@ -228,11 +260,16 @@ export default function Tabletop({
         : neighborCenter;
     };
 
-    const snapTokenPositionToGrid = (token: TokenRecord) => {
-      token.container.position.set(
-        snapToCellCenter(token.container.position.x),
-        snapToCellCenter(token.container.position.y)
-      );
+    const stopTokenMotion = (token: TokenRecord) => {
+      token.targetX = null;
+      token.targetY = null;
+      token.moving = false;
+    };
+
+    const setTokenMoveTarget = (token: TokenRecord, targetX: number, targetY: number) => {
+      token.targetX = targetX;
+      token.targetY = targetY;
+      token.moving = true;
     };
 
     const createTokenRecord = (token: {
@@ -286,6 +323,9 @@ export default function Tabletop({
         hpBarFill,
         rotationDeg: token.rotationDeg ?? 0,
         scale: token.scale ?? 1,
+        targetX: null,
+        targetY: null,
+        moving: false,
       };
 
       tokenRecords.push(record);
@@ -299,6 +339,7 @@ export default function Tabletop({
       if (index < 0) return;
 
       const [token] = tokenRecords.splice(index, 1);
+      stopTokenMotion(token);
       token.container.destroy({ children: true });
       selectedTokenIds.delete(tokenId);
       refreshTokenStyles();
@@ -396,15 +437,20 @@ export default function Tabletop({
       let tokenDownX = 0;
       let tokenDownY = 0;
       let tokenDragMoved = false;
+      let tokenDragStartX = 0;
+      let tokenDragStartY = 0;
+      let tokenPreviewX = 0;
+      let tokenPreviewY = 0;
 
       const finishTokenDrag = (selectOnClick: boolean) => {
         if (!draggingToken) return;
 
         const releasedToken = draggingToken;
-
-        if (snapToGridRef.current) {
-          snapTokenPositionToGrid(releasedToken);
-        }
+        const rawX = tokenPreviewX;
+        const rawY = tokenPreviewY;
+        const targetX = snapToGridRef.current ? snapToCellCenter(rawX) : rawX;
+        const targetY = snapToGridRef.current ? snapToCellCenter(rawY) : rawY;
+        setTokenMoveTarget(releasedToken, targetX, targetY);
 
         if (selectOnClick && !tokenDragMoved) {
           setSelection([releasedToken.id]);
@@ -412,6 +458,7 @@ export default function Tabletop({
 
         draggingToken = null;
         tokenPointerId = null;
+        clearMovementPreview();
         canvas.style.cursor = "grab";
       };
 
@@ -472,7 +519,9 @@ export default function Tabletop({
 
         if (draggingToken && event.pointerId === tokenPointerId) {
           const local = world.toLocal(event.global);
-          draggingToken.container.position.set(local.x + tokenOffsetX, local.y + tokenOffsetY);
+          tokenPreviewX = local.x + tokenOffsetX;
+          tokenPreviewY = local.y + tokenOffsetY;
+          drawMovementPreview(draggingToken, tokenDragStartX, tokenDragStartY, tokenPreviewX, tokenPreviewY);
           if (
             Math.abs(event.global.x - tokenDownX) > SELECTION_DRAG_THRESHOLD ||
             Math.abs(event.global.y - tokenDownY) > SELECTION_DRAG_THRESHOLD
@@ -574,14 +623,20 @@ export default function Tabletop({
 
           onRequestCloseContextMenuRef.current?.();
           event.stopPropagation();
+          stopTokenMotion(token);
           draggingToken = token;
           tokenPointerId = event.pointerId;
           tokenDownX = event.global.x;
           tokenDownY = event.global.y;
           tokenDragMoved = false;
+          tokenDragStartX = token.container.x;
+          tokenDragStartY = token.container.y;
           const local = world.toLocal(event.global);
           tokenOffsetX = token.container.x - local.x;
           tokenOffsetY = token.container.y - local.y;
+          tokenPreviewX = token.container.x;
+          tokenPreviewY = token.container.y;
+          drawMovementPreview(token, tokenDragStartX, tokenDragStartY, tokenPreviewX, tokenPreviewY);
           canvas.style.cursor = "grabbing";
         };
 
@@ -670,6 +725,42 @@ export default function Tabletop({
       };
     };
 
+    const setupTokenMotionTicker = () => {
+      if (!app) return () => {};
+
+      const onTick = () => {
+        if (!app) return;
+        const dtSeconds = app.ticker.deltaMS / 1000;
+        if (dtSeconds <= 0) return;
+
+        const step = TOKEN_MOVE_SPEED * dtSeconds;
+        for (const token of tokenRecords) {
+          if (!token.moving || token.targetX === null || token.targetY === null) continue;
+
+          const dx = token.targetX - token.container.x;
+          const dy = token.targetY - token.container.y;
+          const distance = Math.hypot(dx, dy);
+
+          if (distance <= step || distance === 0) {
+            token.container.position.set(token.targetX, token.targetY);
+            stopTokenMotion(token);
+            continue;
+          }
+
+          const invDistance = 1 / distance;
+          token.container.position.set(
+            token.container.x + dx * invDistance * step,
+            token.container.y + dy * invDistance * step
+          );
+        }
+      };
+
+      app.ticker.add(onTick);
+      return () => {
+        app?.ticker.remove(onTick);
+      };
+    };
+
     const onResize = () => {
       if (app) {
         app.stage.hitArea = new Rectangle(0, 0, app.screen.width, app.screen.height);
@@ -711,6 +802,9 @@ export default function Tabletop({
       originMarker = new Graphics();
       world.addChild(originMarker);
 
+      movementPreviewOverlay = new Graphics();
+      world.addChild(movementPreviewOverlay);
+
       tokenRecords = [];
       for (const token of TOKEN_DEFINITIONS) {
         createTokenRecord(token);
@@ -727,18 +821,25 @@ export default function Tabletop({
       };
       rebindInteractionHandlers();
       detachKeyboard = setupKeyboardShortcuts();
+      const detachTokenMotionTicker = setupTokenMotionTicker();
 
       onResize();
       window.addEventListener("resize", onResize);
+
+      return detachTokenMotionTicker;
     };
 
-    void mount();
+    let detachTokenMotionTicker: (() => void) | null = null;
+    void mount().then((detachTicker) => {
+      detachTokenMotionTicker = detachTicker ?? null;
+    });
 
     return () => {
       disposed = true;
       window.removeEventListener("resize", onResize);
       if (detachInteractions) detachInteractions();
       if (detachKeyboard) detachKeyboard();
+      if (detachTokenMotionTicker) detachTokenMotionTicker();
       runContextActionRef.current = null;
       if (app) app.destroy(true, { children: true });
     };
