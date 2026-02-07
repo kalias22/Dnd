@@ -1,5 +1,5 @@
-import { useEffect, useRef } from "react";
-import { Application, Container, Graphics, Rectangle, Text } from "pixi.js";
+import { useEffect, useRef, type PointerEvent as ReactPointerEvent } from "react";
+import { Application, Container, Graphics, Rectangle, Sprite, Text } from "pixi.js";
 
 const GRID_CELL_SIZE = 50;
 const ORIGIN_MARKER_SIZE = 22;
@@ -14,6 +14,7 @@ const TOKEN_SCALE_UP_FACTOR = 1.1;
 const MIN_TOKEN_SCALE = 0.25;
 const MAX_TOKEN_SCALE = 4;
 const TOKEN_MOVE_SPEED = 600;
+const PLACED_ASSET_MAX_SIZE = 240;
 const TOKEN_DEFINITIONS = [
   { id: "token-1", name: "Aria", x: 200, y: 200, radius: 18, color: 0xd35400, hpCurrent: 22, hpMax: 30 },
   { id: "token-2", name: "Bram", x: 320, y: 260, radius: 16, color: 0x1abc9c, hpCurrent: 11, hpMax: 18 },
@@ -50,9 +51,17 @@ export type TokenSummary = {
   name: string;
 };
 
+export type PlacingAsset = {
+  id: string;
+  name: string;
+  url: string;
+};
+
 type TabletopProps = {
   snapToGrid?: boolean;
   contextAction?: TokenContextAction | null;
+  placingAsset?: PlacingAsset | null;
+  onPlacedAsset?: () => void;
   onTokensChange?: (tokens: TokenSummary[]) => void;
   onTokenContextMenu?: (tokenId: string, screenX: number, screenY: number) => void;
   onRequestCloseContextMenu?: () => void;
@@ -61,20 +70,33 @@ type TabletopProps = {
 export default function Tabletop({
   snapToGrid = true,
   contextAction = null,
+  placingAsset = null,
+  onPlacedAsset,
   onTokensChange,
   onTokenContextMenu,
   onRequestCloseContextMenu,
 }: TabletopProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const snapToGridRef = useRef(snapToGrid);
+  const placingAssetRef = useRef<PlacingAsset | null>(placingAsset);
+  const onPlacedAssetRef = useRef(onPlacedAsset);
   const onTokensChangeRef = useRef(onTokensChange);
   const onTokenContextMenuRef = useRef(onTokenContextMenu);
   const onRequestCloseContextMenuRef = useRef(onRequestCloseContextMenu);
   const runContextActionRef = useRef<((action: TokenContextAction) => void) | null>(null);
+  const placeAssetAtClientRef = useRef<(clientX: number, clientY: number) => boolean>(() => false);
 
   useEffect(() => {
     snapToGridRef.current = snapToGrid;
   }, [snapToGrid]);
+
+  useEffect(() => {
+    placingAssetRef.current = placingAsset;
+  }, [placingAsset]);
+
+  useEffect(() => {
+    onPlacedAssetRef.current = onPlacedAsset;
+  }, [onPlacedAsset]);
 
   useEffect(() => {
     onTokenContextMenuRef.current = onTokenContextMenu;
@@ -96,6 +118,7 @@ export default function Tabletop({
     let app: Application | null = null;
     let world: Container | null = null;
     let grid: Graphics | null = null;
+    let tilesLayer: Container | null = null;
     let originMarker: Graphics | null = null;
     let selectionOverlay: Graphics | null = null;
     let movementPreviewOverlay: Graphics | null = null;
@@ -270,6 +293,63 @@ export default function Tabletop({
       token.targetX = targetX;
       token.targetY = targetY;
       token.moving = true;
+    };
+
+    const placeAssetSprite = (asset: PlacingAsset, worldX: number, worldY: number) => {
+      if (!tilesLayer) return;
+      const targetLayer = tilesLayer;
+      const placeholder = new Graphics();
+      placeholder.position.set(worldX, worldY);
+      placeholder.rect(-18, -18, 36, 36).fill({ color: 0x9fb7d9, alpha: 0.35 });
+      placeholder.setStrokeStyle({ width: 1.5, color: 0xd9e7ff, alpha: 0.9 });
+      placeholder.rect(-18, -18, 36, 36).stroke();
+      targetLayer.addChild(placeholder);
+
+      const image = new Image();
+      image.onload = () => {
+        if (disposed || targetLayer.destroyed) {
+          placeholder.destroy();
+          return;
+        }
+
+        const sprite = Sprite.from(image);
+        sprite.anchor.set(0.5);
+        sprite.position.set(worldX, worldY);
+        sprite.eventMode = "none";
+
+        if (image.width > 0 && image.height > 0) {
+          const scale = PLACED_ASSET_MAX_SIZE / Math.max(image.width, image.height);
+          sprite.scale.set(scale);
+        }
+
+        targetLayer.addChild(sprite);
+        placeholder.destroy();
+      };
+
+      image.onerror = () => {
+        placeholder.clear();
+        placeholder.rect(-18, -18, 36, 36).fill({ color: 0xa32222, alpha: 0.45 });
+        placeholder.setStrokeStyle({ width: 1.5, color: 0xff8a8a, alpha: 0.95 });
+        placeholder.rect(-18, -18, 36, 36).stroke();
+      };
+
+      image.src = asset.url;
+    };
+
+    placeAssetAtClientRef.current = (clientX: number, clientY: number) => {
+      if (!app || !world) return false;
+      const assetToPlace = placingAssetRef.current;
+      if (!assetToPlace) return false;
+
+      const canvas = app.canvas as HTMLCanvasElement;
+      const rect = canvas.getBoundingClientRect();
+      const screenX = clientX - rect.left;
+      const screenY = clientY - rect.top;
+      const worldX = (screenX - world.position.x) / world.scale.x;
+      const worldY = (screenY - world.position.y) / world.scale.y;
+
+      placeAssetSprite(assetToPlace, worldX, worldY);
+      return true;
     };
 
     const createTokenRecord = (token: {
@@ -465,13 +545,14 @@ export default function Tabletop({
       const onStagePointerDown = (event: any) => {
         if (!world) return;
         onRequestCloseContextMenuRef.current?.();
+        const button = event.button ?? 0;
 
-        if (event.button === 2) {
+        if (button === 2) {
           event.nativeEvent?.preventDefault?.();
           return;
         }
 
-        if (event.button === 1) {
+        if (button === 1) {
           event.nativeEvent?.preventDefault?.();
           panning = true;
           panPointerId = event.pointerId;
@@ -481,7 +562,7 @@ export default function Tabletop({
           return;
         }
 
-        if (event.button !== 0) return;
+        if (button !== 0) return;
 
         selecting = true;
         selectionPointerId = event.pointerId;
@@ -607,8 +688,9 @@ export default function Tabletop({
       for (const token of tokens) {
         const onTokenPointerDown = (event: any) => {
           if (!world) return;
+          const button = event.button ?? 0;
 
-          if (event.button === 2) {
+          if (button === 2) {
             event.stopPropagation();
             event.nativeEvent?.preventDefault?.();
             event.nativeEvent?.stopPropagation?.();
@@ -619,7 +701,7 @@ export default function Tabletop({
             return;
           }
 
-          if (event.button !== 0) return;
+          if (button !== 0) return;
 
           onRequestCloseContextMenuRef.current?.();
           event.stopPropagation();
@@ -799,6 +881,9 @@ export default function Tabletop({
       grid = new Graphics();
       world.addChild(grid);
 
+      tilesLayer = new Container();
+      world.addChild(tilesLayer);
+
       originMarker = new Graphics();
       world.addChild(originMarker);
 
@@ -840,6 +925,7 @@ export default function Tabletop({
       if (detachInteractions) detachInteractions();
       if (detachKeyboard) detachKeyboard();
       if (detachTokenMotionTicker) detachTokenMotionTicker();
+      placeAssetAtClientRef.current = () => false;
       runContextActionRef.current = null;
       if (app) app.destroy(true, { children: true });
     };
@@ -849,6 +935,17 @@ export default function Tabletop({
     if (!contextAction) return;
     runContextActionRef.current?.(contextAction);
   }, [contextAction]);
+
+  const onPlacementOverlayPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+
+    const placed = placeAssetAtClientRef.current(event.clientX, event.clientY);
+    if (placed) {
+      onPlacedAssetRef.current?.();
+    }
+  };
 
   return (
     <div
@@ -861,6 +958,18 @@ export default function Tabletop({
         overflow: "hidden",
         background: "#0b0c10",
       }}
-    />
+    >
+      {placingAsset && (
+        <div
+          onPointerDown={onPlacementOverlayPointerDown}
+          style={{
+            position: "absolute",
+            inset: 0,
+            zIndex: 20,
+            cursor: "crosshair",
+          }}
+        />
+      )}
+    </div>
   );
 }

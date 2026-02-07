@@ -1,5 +1,5 @@
 import { type CSSProperties, type ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
-import Tabletop, { type TokenContextAction, type TokenSummary } from "./components/Tabletop";
+import Tabletop, { type PlacingAsset, type TokenContextAction, type TokenSummary } from "./components/Tabletop";
 
 type ContextActionInput =
   | { type: "delete"; tokenId: string }
@@ -43,6 +43,7 @@ export default function App() {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; tokenId: string } | null>(null);
   const [contextAction, setContextAction] = useState<TokenContextAction | null>(null);
   const [assets, setAssets] = useState<AssetImage[]>([]);
+  const [placingAsset, setPlacingAsset] = useState<PlacingAsset | null>(null);
   const [tokens, setTokens] = useState<TokenSummary[]>([]);
   const [initiativeById, setInitiativeById] = useState<Record<string, number>>({});
   const [initiativeOrder, setInitiativeOrder] = useState<string[]>([]);
@@ -120,6 +121,21 @@ export default function App() {
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (!placingAsset) return;
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setPlacingAsset(null);
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [placingAsset]);
 
   const handleRenameToken = (tokenId: string) => {
     const nextName = window.prompt("Rename token:");
@@ -201,6 +217,8 @@ export default function App() {
       <Tabletop
         snapToGrid={snapToGrid}
         contextAction={contextAction}
+        placingAsset={placingAsset}
+        onPlacedAsset={() => setPlacingAsset(null)}
         onTokensChange={setTokens}
         onTokenContextMenu={(tokenId, x, y) => setContextMenu({ tokenId, x, y })}
         onRequestCloseContextMenu={closeContextMenu}
@@ -266,7 +284,6 @@ export default function App() {
           <button type="button" onClick={handleImportImages} style={trackerButtonStyle}>
             Import Images
           </button>
-
           <div
             style={{
               border: "1px solid #3a3a3a",
@@ -314,12 +331,63 @@ export default function App() {
                   >
                     {asset.name}
                   </div>
+                  <button
+                    type="button"
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onClick={() => {
+                      setPlacingAsset({ id: asset.id, name: asset.name, url: asset.url });
+                    }}
+                    style={{
+                      ...trackerButtonStyle,
+                      padding: "4px 6px",
+                      fontSize: 11,
+                      background:
+                        placingAsset?.id === asset.id ? "rgba(76,123,255,0.35)" : "rgba(28,28,28,0.95)",
+                    }}
+                  >
+                    Place
+                  </button>
                 </div>
               ))
             )}
           </div>
         </div>
       </div>
+
+      {placingAsset && (
+        <div
+          style={{
+            position: "fixed",
+            top: settingsOpen ? 124 : 56,
+            left: "50%",
+            transform: "translateX(-50%)",
+            zIndex: 1010,
+            border: "1px solid #3a3a3a",
+            borderRadius: 8,
+            padding: "8px 9px",
+            background: "rgba(18,18,18,0.95)",
+            color: "#d8e6ff",
+            fontSize: 12,
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            gap: 8,
+            width: "min(320px, calc(100vw - 24px))",
+            fontFamily: "sans-serif",
+          }}
+        >
+          <span title={placingAsset.name} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            Placing: {placingAsset.name}
+          </span>
+          <button
+            type="button"
+            onClick={() => setPlacingAsset(null)}
+            style={{ ...trackerButtonStyle, padding: "3px 7px", fontSize: 11 }}
+          >
+            Cancel
+          </button>
+        </div>
+      )}
 
       <div
         style={{
