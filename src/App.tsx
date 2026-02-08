@@ -3,16 +3,100 @@ import Tabletop, {
   type AssetLibraryItem,
   type PlacingAsset,
   type PlayerCharacter,
+  type TileMaterial,
+  type TileMaterialTextures,
   type TokenContextAction,
 } from "./components/Tabletop";
 
 type AssetImage = AssetLibraryItem & {
   name: string;
+  source: "general" | "tileset";
 };
 
 type AppMode = "home" | "create" | "play";
 
 const PLAYER_COLORS = ["#d35400", "#1abc9c", "#3498db", "#9b59b6", "#e74c3c", "#f1c40f"];
+
+type TileMaterialImportRole = "base" | "overlay" | "corner";
+type TileMaterialImportInfo = {
+  baseKey: string;
+  baseName: string;
+  role: TileMaterialImportRole;
+};
+type TileMaterialImportGroup = {
+  baseName: string;
+  base?: AssetImage;
+  overlay?: AssetImage;
+  corner?: AssetImage;
+};
+
+const stripFileExtension = (fileName: string) => fileName.replace(/\.[^/.]+$/, "");
+
+const parseTileMaterialImportInfo = (assetName: string): TileMaterialImportInfo | null => {
+  const stem = stripFileExtension(assetName).trim();
+  if (!stem) return null;
+
+  const lowerStem = stem.toLowerCase();
+  const cornerSuffix = "_overlay_corner";
+  const overlaySuffix = "_overlay";
+
+  let role: TileMaterialImportRole = "base";
+  let baseName = stem;
+  if (lowerStem.endsWith(cornerSuffix)) {
+    role = "corner";
+    baseName = stem.slice(0, stem.length - cornerSuffix.length);
+  } else if (lowerStem.endsWith(overlaySuffix)) {
+    role = "overlay";
+    baseName = stem.slice(0, stem.length - overlaySuffix.length);
+  }
+
+  baseName = baseName.trim();
+  if (!baseName) return null;
+  return {
+    baseKey: baseName.toLowerCase(),
+    baseName,
+    role,
+  };
+};
+
+const buildTileMaterialImportGroups = (assets: AssetImage[]) => {
+  const groups = new Map<string, TileMaterialImportGroup>();
+  for (const asset of assets) {
+    if (asset.source !== "tileset") continue;
+    const info = parseTileMaterialImportInfo(asset.name);
+    if (!info) continue;
+    let group = groups.get(info.baseKey);
+    if (!group) {
+      group = { baseName: info.baseName };
+      groups.set(info.baseKey, group);
+    }
+    if (info.role === "base") group.base = asset;
+    if (info.role === "overlay") group.overlay = asset;
+    if (info.role === "corner") group.corner = asset;
+  }
+  return groups;
+};
+
+const MATERIAL_TEXTURE_FIELDS: Array<{ key: keyof TileMaterialTextures; label: string }> = [
+  { key: "baseAssetId", label: "Base Texture" },
+  { key: "overlayAssetId", label: "Blend Overlay" },
+  { key: "cornerOverlayAssetId", label: "Corner Overlay" },
+];
+
+const createEmptyMaterialTextures = (): TileMaterialTextures => ({
+  baseAssetId: "",
+  overlayAssetId: "",
+  cornerOverlayAssetId: "",
+});
+
+const createMaterialTextureDefaults = (assets: AssetImage[]): TileMaterialTextures => {
+  const firstAssetId = assets[0]?.id ?? "";
+  return {
+    baseAssetId: firstAssetId,
+    overlayAssetId: firstAssetId,
+    cornerOverlayAssetId: firstAssetId,
+  };
+};
 
 const createDefaultPlayer = (index: number): PlayerCharacter => ({
   id: `player-${crypto.randomUUID()}`,
@@ -57,14 +141,42 @@ export default function App() {
   const [initiativeOrder, setInitiativeOrder] = useState<string[]>([]);
   const [activeInitiativePlayerId, setActiveInitiativePlayerId] = useState<string | null>(null);
   const [placingAsset, setPlacingAsset] = useState<PlacingAsset | null>(null);
+  const [stampAsset, setStampAsset] = useState<PlacingAsset | null>(null);
+  const [materials, setMaterials] = useState<TileMaterial[]>([]);
+  const [stampingMaterialId, setStampingMaterialId] = useState<string | null>(null);
+  const [editingMaterialId, setEditingMaterialId] = useState<string | null>(null);
+  const [materialNameInput, setMaterialNameInput] = useState("");
+  const [materialPriorityInput, setMaterialPriorityInput] = useState("0");
+  const [materialTextureInput, setMaterialTextureInput] = useState<TileMaterialTextures>(() =>
+    createEmptyMaterialTextures()
+  );
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; tokenId: string } | null>(null);
   const [contextAction, setContextAction] = useState<TokenContextAction | null>(null);
 
   const actionNonceRef = useRef(1);
   const contextMenuRef = useRef<HTMLDivElement | null>(null);
   const assetInputRef = useRef<HTMLInputElement | null>(null);
+  const tileSetInputRef = useRef<HTMLInputElement | null>(null);
   const assetUrlsRef = useRef<string[]>([]);
   const assetLibrary = useMemo<AssetLibraryItem[]>(() => assets.map((asset) => ({ id: asset.id, url: asset.url })), [assets]);
+  const materialTextureAssetIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const material of materials) {
+      ids.add(material.textures.baseAssetId);
+      ids.add(material.textures.overlayAssetId);
+      ids.add(material.textures.cornerOverlayAssetId);
+    }
+    return ids;
+  }, [materials]);
+  const visibleAssets = useMemo(
+    () => assets.filter((asset) => asset.source === "general" && !materialTextureAssetIds.has(asset.id)),
+    [assets, materialTextureAssetIds]
+  );
+  const assetNameById = useMemo(() => new Map(assets.map((asset) => [asset.id, asset.name])), [assets]);
+  const activeStampMaterial = useMemo(
+    () => materials.find((material) => material.id === stampingMaterialId) ?? null,
+    [materials, stampingMaterialId]
+  );
   const sortedInitiativeOrder = useMemo(
     () => sortOrderByInitiativeDesc(mergeOrderWithPlayers(initiativeOrder, players), initiativeById),
     [initiativeOrder, initiativeById, players]
@@ -85,12 +197,47 @@ export default function App() {
       setPlayersOpen(false);
       setAssetsOpen(false);
       setPlacingAsset(null);
+      setStampAsset(null);
+      setStampingMaterialId(null);
+      setEditingMaterialId(null);
     }
   }, [mode]);
 
   useEffect(() => {
     assetUrlsRef.current = assets.map((asset) => asset.url);
   }, [assets]);
+
+  useEffect(() => {
+    const validAssetIds = new Set(assets.map((asset) => asset.id));
+    const fallbackTextures = createMaterialTextureDefaults(assets);
+
+    setMaterialTextureInput((previous) => {
+      const next: TileMaterialTextures = { ...previous };
+      let changed = false;
+
+      for (const { key } of MATERIAL_TEXTURE_FIELDS) {
+        const selectedAssetId = previous[key];
+        if (!selectedAssetId || !validAssetIds.has(selectedAssetId)) {
+          next[key] = fallbackTextures[key];
+          changed = true;
+        }
+      }
+
+      return changed ? next : previous;
+    });
+  }, [assets]);
+
+  useEffect(() => {
+    if (!stampingMaterialId) return;
+    if (materials.some((material) => material.id === stampingMaterialId)) return;
+    setStampingMaterialId(null);
+  }, [materials, stampingMaterialId]);
+
+  useEffect(() => {
+    if (!editingMaterialId) return;
+    if (materials.some((material) => material.id === editingMaterialId)) return;
+    setEditingMaterialId(null);
+  }, [editingMaterialId, materials]);
 
   useEffect(() => {
     const playerIds = players.map((player) => player.id);
@@ -136,11 +283,13 @@ export default function App() {
   }, [contextMenu]);
 
   useEffect(() => {
-    if (!placingAsset) return;
+    if (!placingAsset && !stampAsset && !stampingMaterialId) return;
 
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         setPlacingAsset(null);
+        setStampAsset(null);
+        setStampingMaterialId(null);
       }
     };
 
@@ -148,7 +297,7 @@ export default function App() {
     return () => {
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, [placingAsset]);
+  }, [placingAsset, stampAsset, stampingMaterialId]);
 
   const addPlayer = () => {
     setPlayers((previous) => [...previous, createDefaultPlayer(previous.length + 1)]);
@@ -212,21 +361,142 @@ export default function App() {
     assetInputRef.current?.click();
   };
 
+  const handleImportTileSet = () => {
+    tileSetInputRef.current?.click();
+  };
+
+  const createImportedAssets = (files: File[], source: AssetImage["source"]) =>
+    files.map((file) => ({
+      id: `${file.name}-${file.size}-${file.lastModified}-${crypto.randomUUID()}`,
+      name: file.name,
+      url: URL.createObjectURL(file),
+      source,
+    }));
+
   const handleAssetFilesChange = (event: ChangeEvent<HTMLInputElement>) => {
     const fileList = event.target.files;
     if (!fileList || fileList.length === 0) return;
 
-    const imported: AssetImage[] = [];
-    for (const file of Array.from(fileList)) {
-      imported.push({
-        id: `${file.name}-${file.size}-${file.lastModified}-${crypto.randomUUID()}`,
-        name: file.name,
-        url: URL.createObjectURL(file),
+    const imported = createImportedAssets(Array.from(fileList), "general");
+    setAssets((previous) => [...previous, ...imported]);
+    event.target.value = "";
+  };
+
+  const handleTileSetFilesChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const fileList = event.target.files;
+    if (!fileList || fileList.length === 0) return;
+
+    const imported = createImportedAssets(Array.from(fileList), "tileset");
+    const nextAssets = [...assets, ...imported];
+    setAssets(nextAssets);
+
+    const touchedBaseKeys = new Set<string>();
+    for (const importedAsset of imported) {
+      const info = parseTileMaterialImportInfo(importedAsset.name);
+      if (info) touchedBaseKeys.add(info.baseKey);
+    }
+
+    if (touchedBaseKeys.size > 0) {
+      const groupedAssets = buildTileMaterialImportGroups(nextAssets);
+      setMaterials((previous) => {
+        const nextMaterials = [...previous];
+        for (const baseKey of touchedBaseKeys) {
+          const group = groupedAssets.get(baseKey);
+          if (!group?.base || !group.overlay) continue;
+
+          const textures: TileMaterialTextures = {
+            baseAssetId: group.base.id,
+            overlayAssetId: group.overlay.id,
+            cornerOverlayAssetId: (group.corner ?? group.overlay).id,
+          };
+
+          const existingMaterialIndex = nextMaterials.findIndex(
+            (material) => material.name.trim().toLowerCase() === baseKey
+          );
+
+          if (existingMaterialIndex >= 0) {
+            nextMaterials[existingMaterialIndex] = {
+              ...nextMaterials[existingMaterialIndex],
+              textures,
+            };
+          } else {
+            nextMaterials.push({
+              id: `material-${crypto.randomUUID()}`,
+              name: group.baseName,
+              priority: 0,
+              textures,
+            });
+          }
+        }
+        return nextMaterials;
       });
     }
 
-    setAssets((previous) => [...previous, ...imported]);
     event.target.value = "";
+  };
+
+  const updateMaterialTextureInput = (key: keyof TileMaterialTextures, assetId: string) => {
+    setMaterialTextureInput((previous) => ({ ...previous, [key]: assetId }));
+  };
+
+  const resetMaterialForm = () => {
+    setEditingMaterialId(null);
+    setMaterialNameInput("");
+    setMaterialPriorityInput("0");
+    setMaterialTextureInput(createMaterialTextureDefaults(assets));
+  };
+
+  const startEditingMaterial = (material: TileMaterial) => {
+    setEditingMaterialId(material.id);
+    setMaterialNameInput(material.name);
+    setMaterialPriorityInput(String(material.priority));
+    setMaterialTextureInput({
+      baseAssetId: material.textures.baseAssetId,
+      overlayAssetId: material.textures.overlayAssetId,
+      cornerOverlayAssetId: material.textures.cornerOverlayAssetId || material.textures.overlayAssetId,
+    });
+  };
+
+  const submitMaterial = () => {
+    const trimmedName = materialNameInput.trim();
+    if (!trimmedName) return;
+    const parsedPriority = Number(materialPriorityInput);
+    const priority = Number.isFinite(parsedPriority) ? Math.trunc(parsedPriority) : 0;
+
+    const validAssetIds = new Set(assets.map((asset) => asset.id));
+    for (const { key } of MATERIAL_TEXTURE_FIELDS) {
+      const selectedAssetId = materialTextureInput[key];
+      if (!selectedAssetId || !validAssetIds.has(selectedAssetId)) {
+        return;
+      }
+    }
+
+    const material: TileMaterial = {
+      id: `material-${crypto.randomUUID()}`,
+      name: trimmedName,
+      priority,
+      textures: { ...materialTextureInput },
+    };
+
+    if (editingMaterialId) {
+      setMaterials((previous) =>
+        previous.map((existing) =>
+          existing.id === editingMaterialId
+            ? {
+                ...existing,
+                name: trimmedName,
+                priority,
+                textures: { ...materialTextureInput },
+              }
+            : existing
+        )
+      );
+      resetMaterialForm();
+      return;
+    }
+
+    setMaterials((previous) => [...previous, material]);
+    resetMaterialForm();
   };
 
   const rollAllInitiative = () => {
@@ -260,6 +530,18 @@ export default function App() {
     setInitiativeOrder([]);
     setActiveInitiativePlayerId(null);
   };
+
+  const activeCreateTool = activeStampMaterial
+    ? { label: "Stamping Material", name: activeStampMaterial.name }
+    : stampAsset
+      ? { label: "Stamping", name: stampAsset.name }
+    : placingAsset
+        ? { label: "Placing", name: placingAsset.name }
+        : null;
+  const canCreateMaterial =
+    materialNameInput.trim().length > 0 &&
+    assets.length > 0 &&
+    MATERIAL_TEXTURE_FIELDS.every(({ key }) => Boolean(materialTextureInput[key]));
 
   if (mode === "home") {
     return (
@@ -313,11 +595,22 @@ export default function App() {
         onChange={handleAssetFilesChange}
         style={{ display: "none" }}
       />
+      <input
+        ref={tileSetInputRef}
+        type="file"
+        accept="image/*"
+        multiple
+        onChange={handleTileSetFilesChange}
+        style={{ display: "none" }}
+      />
 
       <Tabletop
         snapToGrid={snapToGrid}
         contextAction={contextAction}
         placingAsset={mode === "create" ? placingAsset : null}
+        stampAsset={mode === "create" ? stampAsset : null}
+        materials={materials}
+        stampingMaterialId={mode === "create" ? stampingMaterialId : null}
         players={players}
         assetLibrary={assetLibrary}
         onPlacedAsset={mode === "create" ? () => setPlacingAsset(null) : undefined}
@@ -346,7 +639,7 @@ export default function App() {
               {assetsOpen ? "Hide" : "Assets"}
             </button>
 
-            <div style={sidePanelStyle}>
+            <div style={{ ...sidePanelStyle, maxHeight: "calc(100vh - 68px)", overflowY: "auto" }}>
               <div style={{ fontSize: 15, fontWeight: 700 }}>Assets</div>
               <button type="button" onClick={handleImportImages} style={trackerButtonStyle}>
                 Import Images
@@ -359,14 +652,14 @@ export default function App() {
                   padding: 8,
                   display: "grid",
                   gap: 8,
-                  maxHeight: "calc(100vh - 180px)",
+                  maxHeight: "34vh",
                   gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
                 }}
               >
-                {assets.length === 0 ? (
+                {visibleAssets.length === 0 ? (
                   <div style={{ gridColumn: "1 / -1", fontSize: 12, color: "#b6b6b6" }}>No images imported</div>
                 ) : (
-                  assets.map((asset) => (
+                  visibleAssets.map((asset) => (
                     <div
                       key={asset.id}
                       style={{
@@ -401,7 +694,11 @@ export default function App() {
                       <button
                         type="button"
                         onPointerDown={(event) => event.stopPropagation()}
-                        onClick={() => setPlacingAsset({ id: asset.id, name: asset.name, url: asset.url })}
+                        onClick={() => {
+                          setStampAsset(null);
+                          setStampingMaterialId(null);
+                          setPlacingAsset({ id: asset.id, name: asset.name, url: asset.url });
+                        }}
                         style={{
                           ...trackerButtonStyle,
                           padding: "4px 6px",
@@ -412,6 +709,158 @@ export default function App() {
                       >
                         Place
                       </button>
+                      <button
+                        type="button"
+                        onPointerDown={(event) => event.stopPropagation()}
+                        onClick={() => {
+                          setPlacingAsset(null);
+                          setStampingMaterialId(null);
+                          setStampAsset({ id: asset.id, name: asset.name, url: asset.url });
+                        }}
+                        style={{
+                          ...trackerButtonStyle,
+                          padding: "4px 6px",
+                          fontSize: 11,
+                          background: stampAsset?.id === asset.id ? "rgba(69,156,124,0.4)" : "rgba(28,28,28,0.95)",
+                        }}
+                      >
+                        Stamp
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+
+              <div style={{ height: 1, background: "rgba(255,255,255,0.08)" }} />
+
+              <div style={{ fontSize: 15, fontWeight: 700 }}>{editingMaterialId ? "Edit Material" : "Materials"}</div>
+              <button type="button" onClick={handleImportTileSet} style={trackerButtonStyle}>
+                Import Tile Set
+              </button>
+              <input
+                type="text"
+                value={materialNameInput}
+                onChange={(event) => setMaterialNameInput(event.target.value)}
+                placeholder="Material name"
+                style={inputStyle}
+              />
+              <input
+                type="number"
+                value={materialPriorityInput}
+                onChange={(event) => setMaterialPriorityInput(event.target.value)}
+                placeholder="Priority (higher overlays lower)"
+                style={inputStyle}
+              />
+              <div style={{ display: "grid", gap: 6 }}>
+                {MATERIAL_TEXTURE_FIELDS.map((field) => (
+                  <label key={field.key} style={{ display: "grid", gap: 3 }}>
+                    <span style={{ fontSize: 11, color: "#bfc7d4" }}>{field.label}</span>
+                    <select
+                      value={materialTextureInput[field.key]}
+                      onChange={(event) => updateMaterialTextureInput(field.key, event.target.value)}
+                      style={{ ...inputStyle, minHeight: 28 }}
+                    >
+                      <option value="">Select asset</option>
+                      {assets.map((asset) => (
+                        <option key={asset.id} value={asset.id}>
+                          {asset.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ))}
+              </div>
+              <button
+                type="button"
+                onClick={submitMaterial}
+                disabled={!canCreateMaterial}
+                style={{
+                  ...trackerButtonStyle,
+                  opacity: canCreateMaterial ? 1 : 0.55,
+                  cursor: canCreateMaterial ? "pointer" : "not-allowed",
+                }}
+              >
+                {editingMaterialId ? "Save Material" : "Create Material"}
+              </button>
+              {editingMaterialId && (
+                <button
+                  type="button"
+                  onClick={resetMaterialForm}
+                  style={{ ...trackerButtonStyle, background: "rgba(50,50,50,0.95)" }}
+                >
+                  Cancel Edit
+                </button>
+              )}
+              <div
+                style={{
+                  border: "1px solid #3a3a3a",
+                  borderRadius: 8,
+                  padding: 8,
+                  maxHeight: 180,
+                  overflowY: "auto",
+                  display: "grid",
+                  gap: 6,
+                }}
+              >
+                {materials.length === 0 ? (
+                  <div style={{ fontSize: 12, color: "#b6b6b6" }}>No materials yet</div>
+                ) : (
+                  materials.map((material) => (
+                    <div
+                      key={material.id}
+                      style={{
+                        border: "1px solid rgba(255,255,255,0.08)",
+                        borderRadius: 6,
+                        padding: 6,
+                        display: "grid",
+                        gap: 6,
+                      }}
+                    >
+                      <div style={{ fontSize: 12, color: "#d9dee7" }}>{material.name}</div>
+                      <div style={{ fontSize: 10, color: "#9ca7bb" }}>
+                        Priority: {material.priority} | Base:{" "}
+                        {assetNameById.get(material.textures.baseAssetId) ?? "Missing"} | Overlay:{" "}
+                        {assetNameById.get(material.textures.overlayAssetId) ?? "Missing"} | Corner:{" "}
+                        {assetNameById.get(material.textures.cornerOverlayAssetId) ?? "Missing"}
+                      </div>
+                      <div style={{ display: "flex", gap: 6 }}>
+                        <button
+                          type="button"
+                          onPointerDown={(event) => event.stopPropagation()}
+                          onClick={() => {
+                            setPlacingAsset(null);
+                            setStampAsset(null);
+                            setStampingMaterialId(material.id);
+                          }}
+                          style={{
+                            ...trackerButtonStyle,
+                            padding: "4px 6px",
+                            fontSize: 11,
+                            background:
+                              stampingMaterialId === material.id
+                                ? "rgba(69,156,124,0.4)"
+                                : "rgba(28,28,28,0.95)",
+                          }}
+                        >
+                          Stamp Material
+                        </button>
+                        <button
+                          type="button"
+                          onPointerDown={(event) => event.stopPropagation()}
+                          onClick={() => startEditingMaterial(material)}
+                          style={{
+                            ...trackerButtonStyle,
+                            padding: "4px 6px",
+                            fontSize: 11,
+                            background:
+                              editingMaterialId === material.id
+                                ? "rgba(95,140,235,0.4)"
+                                : "rgba(28,28,28,0.95)",
+                          }}
+                        >
+                          Edit
+                        </button>
+                      </div>
                     </div>
                   ))
                 )}
@@ -481,7 +930,7 @@ export default function App() {
                           style={{ ...inputStyle, minHeight: 28 }}
                         >
                           <option value="">No image (color token)</option>
-                          {assets.map((asset) => (
+                          {visibleAssets.map((asset) => (
                             <option key={asset.id} value={asset.id}>
                               {asset.name}
                             </option>
@@ -498,7 +947,7 @@ export default function App() {
             </button>
           </div>
 
-          {placingAsset && (
+          {activeCreateTool && (
             <div
               style={{
                 position: "fixed",
@@ -521,14 +970,18 @@ export default function App() {
               }}
             >
               <span
-                title={placingAsset.name}
+                title={activeCreateTool.name}
                 style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
               >
-                Placing: {placingAsset.name}
+                {activeCreateTool.label}: {activeCreateTool.name}
               </span>
               <button
                 type="button"
-                onClick={() => setPlacingAsset(null)}
+                onClick={() => {
+                  setPlacingAsset(null);
+                  setStampAsset(null);
+                  setStampingMaterialId(null);
+                }}
                 style={{ ...trackerButtonStyle, padding: "3px 7px", fontSize: 11 }}
               >
                 Cancel
@@ -571,7 +1024,7 @@ export default function App() {
                   style={inputStyle}
                 >
                   <option value="">No image (color token)</option>
-                  {assets.map((asset) => (
+                  {visibleAssets.map((asset) => (
                     <option key={asset.id} value={asset.id}>
                       {asset.name}
                     </option>

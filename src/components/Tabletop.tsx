@@ -1,7 +1,7 @@
-import { useEffect, useRef, type PointerEvent as ReactPointerEvent } from "react";
-import { Application, Container, Graphics, Rectangle, Sprite, Text } from "pixi.js";
+import { useEffect, useRef } from "react";
+import { Application, Container, Graphics, Rectangle, Sprite, Text, Texture } from "pixi.js";
 
-const GRID_CELL_SIZE = 50;
+const GRID_SIZE = 64;
 const ORIGIN_MARKER_SIZE = 22;
 const ORIGIN_MARKER_THICKNESS = 3;
 const MIN_ZOOM = 0.25;
@@ -17,6 +17,7 @@ const TOKEN_MOVE_SPEED = 600;
 const PLACED_ASSET_MAX_SIZE = 240;
 const DEFAULT_PLAYER_RADIUS = 18;
 const DEFAULT_PLAYER_HP = 10;
+const BASE_TILE_ROTATIONS = [0, Math.PI / 2, Math.PI, Math.PI * 1.5] as const;
 
 type TokenRecord = {
   id: string;
@@ -41,6 +42,15 @@ type TokenRecord = {
   moving: boolean;
 };
 
+type LegacyTileMaterialTextures = Partial<{
+  isolatedAssetId: string;
+  endAssetId: string;
+  straightAssetId: string;
+  cornerAssetId: string;
+  teeAssetId: string;
+  crossAssetId: string;
+}>;
+
 export type TokenContextAction =
   | { nonce: number; type: "delete"; tokenId: string }
   | { nonce: number; type: "duplicate"; tokenId: string }
@@ -56,6 +66,19 @@ export type PlacingAsset = {
   id: string;
   name: string;
   url: string;
+};
+
+export type TileMaterialTextures = {
+  baseAssetId: string;
+  overlayAssetId: string;
+  cornerOverlayAssetId: string;
+};
+
+export type TileMaterial = {
+  id: string;
+  name: string;
+  priority: number;
+  textures: TileMaterialTextures;
 };
 
 export type PlayerCharacter = {
@@ -74,6 +97,9 @@ type TabletopProps = {
   snapToGrid?: boolean;
   contextAction?: TokenContextAction | null;
   placingAsset?: PlacingAsset | null;
+  stampAsset?: PlacingAsset | null;
+  materials?: TileMaterial[];
+  stampingMaterialId?: string | null;
   players?: PlayerCharacter[];
   assetLibrary?: AssetLibraryItem[];
   onPlacedAsset?: () => void;
@@ -86,6 +112,9 @@ export default function Tabletop({
   snapToGrid = true,
   contextAction = null,
   placingAsset = null,
+  stampAsset = null,
+  materials = [],
+  stampingMaterialId = null,
   players = [],
   assetLibrary = [],
   onPlacedAsset,
@@ -96,6 +125,9 @@ export default function Tabletop({
   const hostRef = useRef<HTMLDivElement>(null);
   const snapToGridRef = useRef(snapToGrid);
   const placingAssetRef = useRef<PlacingAsset | null>(placingAsset);
+  const stampAssetRef = useRef<PlacingAsset | null>(stampAsset);
+  const materialsRef = useRef<TileMaterial[]>(materials);
+  const stampingMaterialIdRef = useRef<string | null>(stampingMaterialId);
   const playersRef = useRef<PlayerCharacter[]>(players);
   const assetLibraryRef = useRef<AssetLibraryItem[]>(assetLibrary);
   const onPlacedAssetRef = useRef(onPlacedAsset);
@@ -103,10 +135,13 @@ export default function Tabletop({
   const onTokenContextMenuRef = useRef(onTokenContextMenu);
   const onRequestCloseContextMenuRef = useRef(onRequestCloseContextMenu);
   const runContextActionRef = useRef<((action: TokenContextAction) => void) | null>(null);
-  const placeAssetAtClientRef = useRef<(clientX: number, clientY: number) => boolean>(() => false);
+  const placeAssetAtClientRef = useRef<
+    (clientX: number, clientY: number) => "single" | "stamp" | "material" | null
+  >(() => null);
   const syncPlayersRef = useRef<((nextPlayers: PlayerCharacter[], nextAssets: AssetLibraryItem[]) => void) | null>(
     null
   );
+  const refreshMaterialTilesRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     snapToGridRef.current = snapToGrid;
@@ -117,6 +152,19 @@ export default function Tabletop({
   }, [placingAsset]);
 
   useEffect(() => {
+    stampAssetRef.current = stampAsset;
+  }, [stampAsset]);
+
+  useEffect(() => {
+    materialsRef.current = materials;
+    refreshMaterialTilesRef.current?.();
+  }, [materials]);
+
+  useEffect(() => {
+    stampingMaterialIdRef.current = stampingMaterialId;
+  }, [stampingMaterialId]);
+
+  useEffect(() => {
     playersRef.current = players;
     syncPlayersRef.current?.(players, assetLibraryRef.current);
   }, [players]);
@@ -124,6 +172,7 @@ export default function Tabletop({
   useEffect(() => {
     assetLibraryRef.current = assetLibrary;
     syncPlayersRef.current?.(playersRef.current, assetLibrary);
+    refreshMaterialTilesRef.current?.();
   }, [assetLibrary]);
 
   useEffect(() => {
@@ -151,16 +200,26 @@ export default function Tabletop({
     let world: Container | null = null;
     let grid: Graphics | null = null;
     let tilesLayer: Container | null = null;
+    let overlaysLayer: Container | null = null;
+    let tokensLayer: Container | null = null;
     let originMarker: Graphics | null = null;
     let selectionOverlay: Graphics | null = null;
     let movementPreviewOverlay: Graphics | null = null;
     let tokenRecords: TokenRecord[] = [];
     let selectedTokenIds = new Set<string>();
+    type MaterialTileRecord = { gx: number; gy: number; materialId: string; sprite: Sprite; baseRotation: number };
+    type TileCellRecord = { base?: Sprite; overlays: Sprite[] };
+    let materialTileByCellKey = new Map<string, MaterialTileRecord>();
+    let tileCellByKey = new Map<string, TileCellRecord>();
+    const textureByUrl = new Map<string, Texture>();
+    const loadingTextureUrls = new Set<string>();
+    const failedTextureUrls = new Set<string>();
     let detachInteractions: (() => void) | null = null;
     let detachKeyboard: (() => void) | null = null;
     let rebindInteractionHandlers: (() => void) | null = null;
 
     const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
+    const getRandomBaseRotation = () => BASE_TILE_ROTATIONS[Math.floor(Math.random() * BASE_TILE_ROTATIONS.length)];
     const parseHexColor = (input: string, fallback: number) => {
       const normalized = input.trim().replace("#", "");
       if (/^[0-9a-fA-F]{6}$/.test(normalized)) {
@@ -333,20 +392,20 @@ export default function Tabletop({
 
       const halfWidth = Math.max(app.screen.width * 2, 2000);
       const halfHeight = Math.max(app.screen.height * 2, 2000);
-      const startX = Math.floor(-halfWidth / GRID_CELL_SIZE) * GRID_CELL_SIZE;
-      const endX = Math.ceil(halfWidth / GRID_CELL_SIZE) * GRID_CELL_SIZE;
-      const startY = Math.floor(-halfHeight / GRID_CELL_SIZE) * GRID_CELL_SIZE;
-      const endY = Math.ceil(halfHeight / GRID_CELL_SIZE) * GRID_CELL_SIZE;
+      const startX = Math.floor(-halfWidth / GRID_SIZE) * GRID_SIZE;
+      const endX = Math.ceil(halfWidth / GRID_SIZE) * GRID_SIZE;
+      const startY = Math.floor(-halfHeight / GRID_SIZE) * GRID_SIZE;
+      const endY = Math.ceil(halfHeight / GRID_SIZE) * GRID_SIZE;
 
       grid.clear();
       grid.setStrokeStyle({ width: 1, color: 0x505050, alpha: 0.9 });
 
-      for (let x = startX; x <= endX; x += GRID_CELL_SIZE) {
+      for (let x = startX; x <= endX; x += GRID_SIZE) {
         grid.moveTo(x, startY);
         grid.lineTo(x, endY);
       }
 
-      for (let y = startY; y <= endY; y += GRID_CELL_SIZE) {
+      for (let y = startY; y <= endY; y += GRID_SIZE) {
         grid.moveTo(startX, y);
         grid.lineTo(endX, y);
       }
@@ -368,15 +427,274 @@ export default function Tabletop({
       });
     };
 
-    const snapToCellCenter = (value: number) => {
-      const halfCell = GRID_CELL_SIZE / 2;
-      const baseCenter = Math.floor(value / GRID_CELL_SIZE) * GRID_CELL_SIZE + halfCell;
-      const neighborCenter = baseCenter + GRID_CELL_SIZE;
-
-      return Math.abs(value - baseCenter) <= Math.abs(value - neighborCenter)
-        ? baseCenter
-        : neighborCenter;
+    const toCellCoordinate = (value: number) => Math.round((value - GRID_SIZE / 2) / GRID_SIZE);
+    const toCellCenterCoordinate = (cellCoordinate: number) => cellCoordinate * GRID_SIZE + GRID_SIZE / 2;
+    const snapToCellCenter = (value: number) => toCellCenterCoordinate(toCellCoordinate(value));
+    const toMaterialTileCellKey = (gx: number, gy: number) => `${gx},${gy}`;
+    const getOrCreateTileCell = (gx: number, gy: number) => {
+      const key = toMaterialTileCellKey(gx, gy);
+      let existing = tileCellByKey.get(key);
+      if (existing) return existing;
+      existing = { overlays: [] };
+      tileCellByKey.set(key, existing);
+      return existing;
     };
+    const setBaseSpriteAtCell = (gx: number, gy: number, sprite: Sprite) => {
+      getOrCreateTileCell(gx, gy).base = sprite;
+    };
+    const addOverlaySpriteAtCell = (gx: number, gy: number, sprite: Sprite) => {
+      getOrCreateTileCell(gx, gy).overlays.push(sprite);
+    };
+    const getMaterialTileAt = (gx: number, gy: number) => materialTileByCellKey.get(toMaterialTileCellKey(gx, gy)) ?? null;
+
+    const getMaterialById = (materialId: string) =>
+      materialsRef.current.find((material) => material.id === materialId) ?? null;
+
+    const ensureTextureByUrl = (url: string | null | undefined) => {
+      if (!url) return null;
+      const cachedTexture = textureByUrl.get(url);
+      if (cachedTexture) return cachedTexture;
+      if (failedTextureUrls.has(url)) return null;
+
+      if (!loadingTextureUrls.has(url)) {
+        loadingTextureUrls.add(url);
+        const image = new Image();
+        image.onload = () => {
+          if (disposed) return;
+          loadingTextureUrls.delete(url);
+          textureByUrl.set(url, Texture.from(image));
+          refreshMaterialTilesRef.current?.();
+        };
+        image.onerror = () => {
+          if (disposed) return;
+          loadingTextureUrls.delete(url);
+          failedTextureUrls.add(url);
+          refreshMaterialTilesRef.current?.();
+        };
+        image.src = url;
+      }
+
+      return null;
+    };
+
+    const resolveMaterialTextures = (materialId: string) => {
+      const material = getMaterialById(materialId);
+      if (!material) return null;
+
+      const textureConfig = material.textures as TileMaterialTextures & LegacyTileMaterialTextures;
+      const baseAssetId = textureConfig.baseAssetId || textureConfig.isolatedAssetId || textureConfig.crossAssetId || "";
+      const overlayAssetId = textureConfig.overlayAssetId || textureConfig.endAssetId || "";
+      const cornerOverlayAssetId =
+        textureConfig.cornerOverlayAssetId || textureConfig.cornerAssetId || textureConfig.overlayAssetId || "";
+
+      const baseTextureUrl = assetLibraryRef.current.find((asset) => asset.id === baseAssetId)?.url;
+      const overlayTextureUrl = assetLibraryRef.current.find((asset) => asset.id === overlayAssetId)?.url;
+      const cornerOverlayTextureUrl = assetLibraryRef.current.find((asset) => asset.id === cornerOverlayAssetId)?.url;
+
+      return {
+        base: ensureTextureByUrl(baseTextureUrl),
+        overlay: ensureTextureByUrl(overlayTextureUrl),
+        corner: ensureTextureByUrl(cornerOverlayTextureUrl),
+      };
+    };
+
+    const shouldOverlayNeighbor = (materialId: string, neighborMaterialId: string) => {
+      if (materialId === neighborMaterialId) return false;
+      const material = getMaterialById(materialId);
+      const neighborMaterial = getMaterialById(neighborMaterialId);
+      if (!material || !neighborMaterial) return false;
+      if (material.priority !== neighborMaterial.priority) {
+        return material.priority > neighborMaterial.priority;
+      }
+      const materialIndex = materialsRef.current.findIndex((candidate) => candidate.id === materialId);
+      const neighborIndex = materialsRef.current.findIndex((candidate) => candidate.id === neighborMaterialId);
+      return materialIndex > neighborIndex;
+    };
+
+    const updateMaterialTileVisualAt = (gx: number, gy: number) => {
+      const tile = getMaterialTileAt(gx, gy);
+      if (!tile) return;
+
+      const resolvedTextures = resolveMaterialTextures(tile.materialId);
+      const baseTexture = resolvedTextures?.base ?? resolvedTextures?.overlay ?? null;
+
+      tile.sprite.anchor.set(0.5);
+      tile.sprite.position.set(toCellCenterCoordinate(tile.gx), toCellCenterCoordinate(tile.gy));
+      tile.sprite.width = GRID_SIZE;
+      tile.sprite.height = GRID_SIZE;
+      tile.sprite.rotation = tile.baseRotation ?? 0;
+
+      if (baseTexture) {
+        tile.sprite.texture = baseTexture;
+        tile.sprite.tint = 0xffffff;
+        tile.sprite.alpha = 1;
+      } else {
+        tile.sprite.texture = Texture.WHITE;
+        tile.sprite.tint = 0x7c7c7c;
+        tile.sprite.alpha = 1;
+      }
+      setBaseSpriteAtCell(gx, gy, tile.sprite);
+    };
+
+    const clearAllMaterialOverlays = () => {
+      for (const cell of tileCellByKey.values()) {
+        for (const overlaySprite of cell.overlays) {
+          if (!overlaySprite.destroyed) {
+            overlaySprite.destroy();
+          }
+        }
+        cell.overlays = [];
+      }
+    };
+
+    const rebuildMaterialOverlays = () => {
+      clearAllMaterialOverlays();
+      if (!overlaysLayer) return;
+
+      // Rotation 0 assumes the edge overlay artwork points from left to right.
+      const edgeDirections = [
+        { dx: 1, dy: 0, rotation: 0, side: "east" as const },
+        { dx: 0, dy: 1, rotation: Math.PI / 2, side: "south" as const },
+        { dx: -1, dy: 0, rotation: Math.PI, side: "west" as const },
+        { dx: 0, dy: -1, rotation: -Math.PI / 2, side: "north" as const },
+      ];
+
+      // Rotation 0 assumes the corner overlay artwork is in the bottom-left corner of the texture.
+      const cornerDirections = [
+        { requires: ["north", "east"] as const, dx: 1, dy: -1, rotation: 0 },
+        { requires: ["south", "east"] as const, dx: 1, dy: 1, rotation: Math.PI / 2 },
+        { requires: ["south", "west"] as const, dx: -1, dy: 1, rotation: Math.PI },
+        { requires: ["north", "west"] as const, dx: -1, dy: -1, rotation: -Math.PI / 2 },
+      ];
+
+      const placedCornerKeys = new Set<string>();
+
+      for (const tile of materialTileByCellKey.values()) {
+        const resolvedTextures = resolveMaterialTextures(tile.materialId);
+        if (!resolvedTextures) continue;
+
+        const coveredSides = {
+          north: false,
+          east: false,
+          south: false,
+          west: false,
+        };
+
+        for (const direction of edgeDirections) {
+          const neighbor = getMaterialTileAt(tile.gx + direction.dx, tile.gy + direction.dy);
+          if (!neighbor) continue;
+          if (!shouldOverlayNeighbor(tile.materialId, neighbor.materialId)) continue;
+          coveredSides[direction.side] = true;
+        }
+
+        if (resolvedTextures.overlay) {
+          const overlayTexture = resolvedTextures.overlay;
+          for (const direction of edgeDirections) {
+            if (!coveredSides[direction.side]) continue;
+            const neighborX = tile.gx + direction.dx;
+            const neighborY = tile.gy + direction.dy;
+
+            const overlaySprite = new Sprite(overlayTexture);
+            overlaySprite.anchor.set(0.5);
+            overlaySprite.position.set(toCellCenterCoordinate(neighborX), toCellCenterCoordinate(neighborY));
+            overlaySprite.width = GRID_SIZE;
+            overlaySprite.height = GRID_SIZE;
+            overlaySprite.rotation = direction.rotation;
+            overlaySprite.eventMode = "none";
+
+            overlaysLayer.addChild(overlaySprite);
+            addOverlaySpriteAtCell(neighborX, neighborY, overlaySprite);
+          }
+        }
+
+        if (!resolvedTextures?.corner) continue;
+
+        for (const cornerDirection of cornerDirections) {
+          const [firstSide, secondSide] = cornerDirection.requires;
+          if (!coveredSides[firstSide] || !coveredSides[secondSide]) continue;
+
+          const diagonalX = tile.gx + cornerDirection.dx;
+          const diagonalY = tile.gy + cornerDirection.dy;
+          const diagonalNeighbor = getMaterialTileAt(diagonalX, diagonalY);
+          if (!diagonalNeighbor) continue;
+          if (!shouldOverlayNeighbor(tile.materialId, diagonalNeighbor.materialId)) continue;
+
+          const cornerKey = `${tile.materialId}|${diagonalX},${diagonalY}|${cornerDirection.rotation}`;
+          if (placedCornerKeys.has(cornerKey)) continue;
+          placedCornerKeys.add(cornerKey);
+
+          const cornerSprite = new Sprite(resolvedTextures.corner);
+          cornerSprite.anchor.set(0.5);
+          cornerSprite.position.set(toCellCenterCoordinate(diagonalX), toCellCenterCoordinate(diagonalY));
+          cornerSprite.width = GRID_SIZE;
+          cornerSprite.height = GRID_SIZE;
+          cornerSprite.rotation = cornerDirection.rotation;
+          cornerSprite.eventMode = "none";
+
+          overlaysLayer.addChild(cornerSprite);
+          addOverlaySpriteAtCell(diagonalX, diagonalY, cornerSprite);
+        }
+      }
+    };
+
+    const updateMaterialTileAndNeighbors = (gx: number, gy: number) => {
+      updateMaterialTileVisualAt(gx, gy);
+      updateMaterialTileVisualAt(gx, gy - 1);
+      updateMaterialTileVisualAt(gx + 1, gy);
+      updateMaterialTileVisualAt(gx, gy + 1);
+      updateMaterialTileVisualAt(gx - 1, gy);
+      rebuildMaterialOverlays();
+    };
+
+    const upsertMaterialTileAt = (gx: number, gy: number, materialId: string) => {
+      if (!tilesLayer) return null;
+
+      const cellKey = toMaterialTileCellKey(gx, gy);
+      const existing = materialTileByCellKey.get(cellKey);
+      if (existing) {
+        existing.materialId = materialId;
+        existing.gx = gx;
+        existing.gy = gy;
+        existing.baseRotation = getRandomBaseRotation();
+        setBaseSpriteAtCell(gx, gy, existing.sprite);
+        return existing;
+      }
+
+      const cell = getOrCreateTileCell(gx, gy);
+      if (cell.base && !cell.base.destroyed) {
+        cell.base.destroy();
+      }
+
+      const sprite = new Sprite(Texture.WHITE);
+      sprite.anchor.set(0.5);
+      sprite.position.set(toCellCenterCoordinate(gx), toCellCenterCoordinate(gy));
+      sprite.width = GRID_SIZE;
+      sprite.height = GRID_SIZE;
+      sprite.eventMode = "none";
+      tilesLayer.addChild(sprite);
+
+      const created: MaterialTileRecord = { gx, gy, materialId, sprite, baseRotation: getRandomBaseRotation() };
+      materialTileByCellKey.set(cellKey, created);
+      setBaseSpriteAtCell(gx, gy, sprite);
+      return created;
+    };
+
+    const placeMaterialTileAtGrid = (gx: number, gy: number, materialId: string) => {
+      const material = getMaterialById(materialId);
+      if (!material) return false;
+      const tile = upsertMaterialTileAt(gx, gy, material.id);
+      if (!tile) return false;
+      updateMaterialTileAndNeighbors(gx, gy);
+      return true;
+    };
+
+    const refreshAllMaterialTileVisuals = () => {
+      for (const tile of materialTileByCellKey.values()) {
+        updateMaterialTileVisualAt(tile.gx, tile.gy);
+      }
+      rebuildMaterialOverlays();
+    };
+    refreshMaterialTilesRef.current = refreshAllMaterialTileVisuals;
 
     const stopTokenMotion = (token: TokenRecord) => {
       token.targetX = null;
@@ -390,14 +708,17 @@ export default function Tabletop({
       token.moving = true;
     };
 
-    const placeAssetSprite = (asset: PlacingAsset, worldX: number, worldY: number) => {
+    const placeAssetSprite = (asset: PlacingAsset, worldX: number, worldY: number, asGridTile: boolean) => {
       if (!tilesLayer) return;
       const targetLayer = tilesLayer;
+      const placeholderHalfSize = asGridTile ? GRID_SIZE / 2 : 18;
       const placeholder = new Graphics();
       placeholder.position.set(worldX, worldY);
-      placeholder.rect(-18, -18, 36, 36).fill({ color: 0x9fb7d9, alpha: 0.35 });
+      placeholder
+        .rect(-placeholderHalfSize, -placeholderHalfSize, placeholderHalfSize * 2, placeholderHalfSize * 2)
+        .fill({ color: 0x9fb7d9, alpha: 0.35 });
       placeholder.setStrokeStyle({ width: 1.5, color: 0xd9e7ff, alpha: 0.9 });
-      placeholder.rect(-18, -18, 36, 36).stroke();
+      placeholder.rect(-placeholderHalfSize, -placeholderHalfSize, placeholderHalfSize * 2, placeholderHalfSize * 2).stroke();
       targetLayer.addChild(placeholder);
 
       const image = new Image();
@@ -409,12 +730,21 @@ export default function Tabletop({
 
         const sprite = Sprite.from(image);
         sprite.anchor.set(0.5);
-        sprite.position.set(worldX, worldY);
         sprite.eventMode = "none";
 
-        if (image.width > 0 && image.height > 0) {
+        if (asGridTile) {
+          const gx = toCellCoordinate(worldX);
+          const gy = toCellCoordinate(worldY);
+          sprite.position.set(toCellCenterCoordinate(gx), toCellCenterCoordinate(gy));
+          sprite.width = GRID_SIZE;
+          sprite.height = GRID_SIZE;
+          setBaseSpriteAtCell(gx, gy, sprite);
+        } else if (image.width > 0 && image.height > 0) {
+          sprite.position.set(worldX, worldY);
           const scale = PLACED_ASSET_MAX_SIZE / Math.max(image.width, image.height);
           sprite.scale.set(scale);
+        } else {
+          sprite.position.set(worldX, worldY);
         }
 
         targetLayer.addChild(sprite);
@@ -423,28 +753,63 @@ export default function Tabletop({
 
       image.onerror = () => {
         placeholder.clear();
-        placeholder.rect(-18, -18, 36, 36).fill({ color: 0xa32222, alpha: 0.45 });
+        placeholder
+          .rect(-placeholderHalfSize, -placeholderHalfSize, placeholderHalfSize * 2, placeholderHalfSize * 2)
+          .fill({ color: 0xa32222, alpha: 0.45 });
         placeholder.setStrokeStyle({ width: 1.5, color: 0xff8a8a, alpha: 0.95 });
-        placeholder.rect(-18, -18, 36, 36).stroke();
+        placeholder.rect(-placeholderHalfSize, -placeholderHalfSize, placeholderHalfSize * 2, placeholderHalfSize * 2).stroke();
       };
 
       image.src = asset.url;
     };
 
-    placeAssetAtClientRef.current = (clientX: number, clientY: number) => {
-      if (!app || !world) return false;
-      const assetToPlace = placingAssetRef.current;
-      if (!assetToPlace) return false;
+    const getContinuousPlacementKeyAtWorld = (rawWorldX: number, rawWorldY: number) => {
+      const activeStampMaterialId = stampingMaterialIdRef.current;
+      if (activeStampMaterialId) {
+        const gx = toCellCoordinate(rawWorldX);
+        const gy = toCellCoordinate(rawWorldY);
+        return `material:${activeStampMaterialId}:${gx},${gy}`;
+      }
 
+      const singlePlaceAsset = placingAssetRef.current;
+      const stampPlaceAsset = stampAssetRef.current;
+      if (singlePlaceAsset || !stampPlaceAsset) return null;
+      const gx = toCellCoordinate(rawWorldX);
+      const gy = toCellCoordinate(rawWorldY);
+      return `stamp:${stampPlaceAsset.id}:${gx},${gy}`;
+    };
+
+    const placeAssetAtWorld = (rawWorldX: number, rawWorldY: number) => {
+      const activeStampMaterialId = stampingMaterialIdRef.current;
+      if (activeStampMaterialId) {
+        const gx = toCellCoordinate(rawWorldX);
+        const gy = toCellCoordinate(rawWorldY);
+        return placeMaterialTileAtGrid(gx, gy, activeStampMaterialId) ? "material" : null;
+      }
+
+      const singlePlaceAsset = placingAssetRef.current;
+      const stampPlaceAsset = stampAssetRef.current;
+      const assetToPlace = singlePlaceAsset ?? stampPlaceAsset;
+      if (!assetToPlace) return null;
+      const isStampPlacement = !singlePlaceAsset && Boolean(stampPlaceAsset);
+      const snappedX = snapToCellCenter(rawWorldX);
+      const snappedY = snapToCellCenter(rawWorldY);
+      const worldX = isStampPlacement ? snappedX : rawWorldX;
+      const worldY = isStampPlacement ? snappedY : rawWorldY;
+
+      placeAssetSprite(assetToPlace, worldX, worldY, isStampPlacement);
+      return isStampPlacement ? "stamp" : "single";
+    };
+
+    placeAssetAtClientRef.current = (clientX: number, clientY: number) => {
+      if (!app || !world) return null;
       const canvas = app.canvas as HTMLCanvasElement;
       const rect = canvas.getBoundingClientRect();
       const screenX = clientX - rect.left;
       const screenY = clientY - rect.top;
-      const worldX = (screenX - world.position.x) / world.scale.x;
-      const worldY = (screenY - world.position.y) / world.scale.y;
-
-      placeAssetSprite(assetToPlace, worldX, worldY);
-      return true;
+      const rawWorldX = (screenX - world.position.x) / world.scale.x;
+      const rawWorldY = (screenY - world.position.y) / world.scale.y;
+      return placeAssetAtWorld(rawWorldX, rawWorldY);
     };
 
     const createTokenRecord = (token: {
@@ -460,7 +825,7 @@ export default function Tabletop({
       rotationDeg?: number;
       scale?: number;
     }) => {
-      if (!world) return null;
+      if (!tokensLayer) return null;
 
       const tokenContainer = new Container();
       tokenContainer.label = token.id;
@@ -483,7 +848,7 @@ export default function Tabletop({
       tokenContainer.addChild(tokenLabel);
       tokenContainer.addChild(hpBarBg);
       tokenContainer.addChild(hpBarFill);
-      world.addChild(tokenContainer);
+      tokensLayer.addChild(tokenContainer);
 
       const record: TokenRecord = {
         id: token.id,
@@ -541,8 +906,8 @@ export default function Tabletop({
       const duplicate = createTokenRecord({
         id: nextId,
         name: `${source.name} Copy`,
-        x: source.container.x + GRID_CELL_SIZE / 2,
-        y: source.container.y + GRID_CELL_SIZE / 2,
+        x: source.container.x + GRID_SIZE / 2,
+        y: source.container.y + GRID_SIZE / 2,
         radius: source.radius,
         color: source.color,
         tokenImageUrl: source.tokenImageUrl,
@@ -600,8 +965,8 @@ export default function Tabletop({
         const created = createTokenRecord({
           id: player.id,
           name: player.name.trim() || `Player ${index + 1}`,
-          x: GRID_CELL_SIZE / 2 + index * GRID_CELL_SIZE * 2,
-          y: GRID_CELL_SIZE / 2 + GRID_CELL_SIZE * 2,
+          x: GRID_SIZE / 2 + index * GRID_SIZE * 2,
+          y: GRID_SIZE / 2 + GRID_SIZE * 2,
           radius: DEFAULT_PLAYER_RADIUS,
           color: parseHexColor(player.color, 0x777777),
           tokenImageUrl,
@@ -677,6 +1042,9 @@ export default function Tabletop({
       let tokenDragStartY = 0;
       let tokenPreviewX = 0;
       let tokenPreviewY = 0;
+      let paintingPlacement = false;
+      let paintPointerId: number | null = null;
+      let lastPaintPlacementKey: string | null = null;
 
       const finishTokenDrag = (selectOnClick: boolean) => {
         if (!draggingToken) return;
@@ -720,6 +1088,25 @@ export default function Tabletop({
 
         if (button !== 0) return;
 
+        const hasActivePlacement = Boolean(
+          stampingMaterialIdRef.current || placingAssetRef.current || stampAssetRef.current
+        );
+        if (hasActivePlacement) {
+          event.nativeEvent?.preventDefault?.();
+          const local = world.toLocal(event.global);
+          const placedMode = placeAssetAtWorld(local.x, local.y);
+          if (!placedMode) return;
+          if (placedMode === "single") {
+            onPlacedAssetRef.current?.();
+            return;
+          }
+
+          paintingPlacement = true;
+          paintPointerId = event.pointerId;
+          lastPaintPlacementKey = getContinuousPlacementKeyAtWorld(local.x, local.y);
+          return;
+        }
+
         selecting = true;
         selectionPointerId = event.pointerId;
         selectionStartX = event.global.x;
@@ -740,6 +1127,17 @@ export default function Tabletop({
           world.position.y += deltaY;
           lastPanX = event.global.x;
           lastPanY = event.global.y;
+        }
+
+        if (paintingPlacement && event.pointerId === paintPointerId) {
+          const local = world.toLocal(event.global);
+          const nextPlacementKey = getContinuousPlacementKeyAtWorld(local.x, local.y);
+          if (nextPlacementKey && nextPlacementKey !== lastPaintPlacementKey) {
+            const placedMode = placeAssetAtWorld(local.x, local.y);
+            if (placedMode && placedMode !== "single") {
+              lastPaintPlacementKey = nextPlacementKey;
+            }
+          }
         }
 
         if (selecting && event.pointerId === selectionPointerId) {
@@ -773,6 +1171,12 @@ export default function Tabletop({
           panning = false;
           panPointerId = null;
           canvas.style.cursor = "grab";
+        }
+
+        if (paintingPlacement && event.pointerId === paintPointerId) {
+          paintingPlacement = false;
+          paintPointerId = null;
+          lastPaintPlacementKey = null;
         }
 
         if (selecting && event.pointerId === selectionPointerId) {
@@ -1040,13 +1444,21 @@ export default function Tabletop({
       tilesLayer = new Container();
       world.addChild(tilesLayer);
 
+      overlaysLayer = new Container();
+      world.addChild(overlaysLayer);
+
       originMarker = new Graphics();
       world.addChild(originMarker);
 
       movementPreviewOverlay = new Graphics();
       world.addChild(movementPreviewOverlay);
 
+      tokensLayer = new Container();
+      world.addChild(tokensLayer);
+
       tokenRecords = [];
+      materialTileByCellKey = new Map();
+      tileCellByKey = new Map();
 
       selectionOverlay = new Graphics();
       nextApp.stage.addChild(selectionOverlay);
@@ -1078,9 +1490,15 @@ export default function Tabletop({
       if (detachInteractions) detachInteractions();
       if (detachKeyboard) detachKeyboard();
       if (detachTokenMotionTicker) detachTokenMotionTicker();
-      placeAssetAtClientRef.current = () => false;
+      placeAssetAtClientRef.current = () => null;
       runContextActionRef.current = null;
       syncPlayersRef.current = null;
+      refreshMaterialTilesRef.current = null;
+      materialTileByCellKey.clear();
+      tileCellByKey.clear();
+      textureByUrl.clear();
+      loadingTextureUrls.clear();
+      failedTextureUrls.clear();
       if (app) app.destroy(true, { children: true });
     };
   }, []);
@@ -1089,17 +1507,6 @@ export default function Tabletop({
     if (!contextAction) return;
     runContextActionRef.current?.(contextAction);
   }, [contextAction]);
-
-  const onPlacementOverlayPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (event.button !== 0) return;
-    event.preventDefault();
-    event.stopPropagation();
-
-    const placed = placeAssetAtClientRef.current(event.clientX, event.clientY);
-    if (placed) {
-      onPlacedAssetRef.current?.();
-    }
-  };
 
   return (
     <div
@@ -1112,18 +1519,6 @@ export default function Tabletop({
         overflow: "hidden",
         background: "#0b0c10",
       }}
-    >
-      {placingAsset && (
-        <div
-          onPointerDown={onPlacementOverlayPointerDown}
-          style={{
-            position: "absolute",
-            inset: 0,
-            zIndex: 20,
-            cursor: "crosshair",
-          }}
-        />
-      )}
-    </div>
+    />
   );
 }
