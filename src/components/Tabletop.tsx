@@ -15,21 +15,21 @@ const MIN_TOKEN_SCALE = 0.25;
 const MAX_TOKEN_SCALE = 4;
 const TOKEN_MOVE_SPEED = 600;
 const PLACED_ASSET_MAX_SIZE = 240;
-const ENTITY_COLORS = [0xd35400, 0x1abc9c, 0x3498db, 0x9b59b6, 0xe74c3c, 0xf1c40f];
-const TOKEN_DEFINITIONS = [
-  { id: "token-1", name: "Aria", x: 200, y: 200, radius: 18, color: 0xd35400, hpCurrent: 22, hpMax: 30 },
-  { id: "token-2", name: "Bram", x: 320, y: 260, radius: 16, color: 0x1abc9c, hpCurrent: 11, hpMax: 18 },
-  { id: "token-3", name: "Cora", x: 420, y: 140, radius: 20, color: 0x3498db, hpCurrent: 35, hpMax: 40 },
-];
+const DEFAULT_PLAYER_RADIUS = 18;
+const DEFAULT_PLAYER_HP = 10;
 
 type TokenRecord = {
   id: string;
   name: string;
   radius: number;
   color: number;
+  tokenImageUrl: string | null;
+  imageRequestedUrl: string | null;
+  imageLoadVersion: number;
   hpCurrent: number;
   hpMax: number;
   container: Container;
+  imageSprite: Sprite | null;
   body: Graphics;
   label: Text;
   hpBarBg: Graphics;
@@ -42,7 +42,6 @@ type TokenRecord = {
 };
 
 export type TokenContextAction =
-  | { nonce: number; type: "add"; name: string }
   | { nonce: number; type: "delete"; tokenId: string }
   | { nonce: number; type: "duplicate"; tokenId: string }
   | { nonce: number; type: "rename"; tokenId: string; name: string }
@@ -59,10 +58,24 @@ export type PlacingAsset = {
   url: string;
 };
 
+export type PlayerCharacter = {
+  id: string;
+  name: string;
+  color: string;
+  tokenAssetId: string | null;
+};
+
+export type AssetLibraryItem = {
+  id: string;
+  url: string;
+};
+
 type TabletopProps = {
   snapToGrid?: boolean;
   contextAction?: TokenContextAction | null;
   placingAsset?: PlacingAsset | null;
+  players?: PlayerCharacter[];
+  assetLibrary?: AssetLibraryItem[];
   onPlacedAsset?: () => void;
   onTokensChange?: (tokens: TokenSummary[]) => void;
   onTokenContextMenu?: (tokenId: string, screenX: number, screenY: number) => void;
@@ -73,6 +86,8 @@ export default function Tabletop({
   snapToGrid = true,
   contextAction = null,
   placingAsset = null,
+  players = [],
+  assetLibrary = [],
   onPlacedAsset,
   onTokensChange,
   onTokenContextMenu,
@@ -81,12 +96,17 @@ export default function Tabletop({
   const hostRef = useRef<HTMLDivElement>(null);
   const snapToGridRef = useRef(snapToGrid);
   const placingAssetRef = useRef<PlacingAsset | null>(placingAsset);
+  const playersRef = useRef<PlayerCharacter[]>(players);
+  const assetLibraryRef = useRef<AssetLibraryItem[]>(assetLibrary);
   const onPlacedAssetRef = useRef(onPlacedAsset);
   const onTokensChangeRef = useRef(onTokensChange);
   const onTokenContextMenuRef = useRef(onTokenContextMenu);
   const onRequestCloseContextMenuRef = useRef(onRequestCloseContextMenu);
   const runContextActionRef = useRef<((action: TokenContextAction) => void) | null>(null);
   const placeAssetAtClientRef = useRef<(clientX: number, clientY: number) => boolean>(() => false);
+  const syncPlayersRef = useRef<((nextPlayers: PlayerCharacter[], nextAssets: AssetLibraryItem[]) => void) | null>(
+    null
+  );
 
   useEffect(() => {
     snapToGridRef.current = snapToGrid;
@@ -95,6 +115,16 @@ export default function Tabletop({
   useEffect(() => {
     placingAssetRef.current = placingAsset;
   }, [placingAsset]);
+
+  useEffect(() => {
+    playersRef.current = players;
+    syncPlayersRef.current?.(players, assetLibraryRef.current);
+  }, [players]);
+
+  useEffect(() => {
+    assetLibraryRef.current = assetLibrary;
+    syncPlayersRef.current?.(playersRef.current, assetLibrary);
+  }, [assetLibrary]);
 
   useEffect(() => {
     onPlacedAssetRef.current = onPlacedAsset;
@@ -131,6 +161,13 @@ export default function Tabletop({
     let rebindInteractionHandlers: (() => void) | null = null;
 
     const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
+    const parseHexColor = (input: string, fallback: number) => {
+      const normalized = input.trim().replace("#", "");
+      if (/^[0-9a-fA-F]{6}$/.test(normalized)) {
+        return Number.parseInt(normalized, 16);
+      }
+      return fallback;
+    };
     const emitTokensChange = () => {
       onTokensChangeRef.current?.(
         tokenRecords.map((token) => ({
@@ -141,8 +178,64 @@ export default function Tabletop({
     };
 
     const drawToken = (token: TokenRecord, selected: boolean) => {
+      if (token.tokenImageUrl) {
+        if (token.imageRequestedUrl !== token.tokenImageUrl) {
+          token.imageRequestedUrl = token.tokenImageUrl;
+          token.imageLoadVersion += 1;
+          const currentLoadVersion = token.imageLoadVersion;
+          const requestedUrl = token.tokenImageUrl;
+          const image = new Image();
+          image.onload = () => {
+            if (disposed || token.container.destroyed) return;
+            if (token.imageLoadVersion !== currentLoadVersion) return;
+            if (token.imageRequestedUrl !== requestedUrl) return;
+
+            if (token.imageSprite) {
+              token.imageSprite.destroy();
+            }
+
+            const sprite = Sprite.from(image);
+            sprite.anchor.set(0.5);
+            sprite.eventMode = "none";
+            token.container.addChildAt(sprite, 0);
+            token.imageSprite = sprite;
+            drawToken(token, selectedTokenIds.has(token.id));
+          };
+          image.onerror = () => {
+            if (disposed || token.container.destroyed) return;
+            if (token.imageLoadVersion !== currentLoadVersion) return;
+            if (token.imageRequestedUrl !== requestedUrl) return;
+            if (token.imageSprite) {
+              token.imageSprite.destroy();
+              token.imageSprite = null;
+            }
+          };
+          image.src = requestedUrl;
+        }
+        if (token.imageSprite) {
+          const diameter = token.radius * 2;
+          const sourceWidth = token.imageSprite.texture.width;
+          const sourceHeight = token.imageSprite.texture.height;
+          if (sourceWidth > 0 && sourceHeight > 0) {
+            const uniformScale = diameter / Math.max(sourceWidth, sourceHeight);
+            token.imageSprite.scale.set(uniformScale);
+          }
+        }
+      } else {
+        token.imageRequestedUrl = null;
+        token.imageLoadVersion += 1;
+        if (token.imageSprite) {
+          token.imageSprite.destroy();
+          token.imageSprite = null;
+        }
+      }
+
       token.body.clear();
-      token.body.circle(0, 0, token.radius).fill({ color: token.color, alpha: 1 });
+      if (token.tokenImageUrl && token.imageSprite) {
+        token.body.circle(0, 0, token.radius).fill({ color: 0xffffff, alpha: 0.001 });
+      } else {
+        token.body.circle(0, 0, token.radius).fill({ color: token.color, alpha: 1 });
+      }
       if (selected) {
         token.body.setStrokeStyle({ width: 3, color: 0xfff07a, alpha: 1 });
         token.body.circle(0, 0, token.radius + 4).stroke();
@@ -361,6 +454,7 @@ export default function Tabletop({
       y: number;
       radius: number;
       color: number;
+      tokenImageUrl?: string | null;
       hpCurrent: number;
       hpMax: number;
       rotationDeg?: number;
@@ -396,9 +490,13 @@ export default function Tabletop({
         name: token.name,
         radius: token.radius,
         color: token.color,
+        tokenImageUrl: token.tokenImageUrl ?? null,
+        imageRequestedUrl: null,
+        imageLoadVersion: 0,
         hpCurrent: token.hpCurrent,
         hpMax: Math.max(1, token.hpMax),
         container: tokenContainer,
+        imageSprite: null,
         body: tokenBody,
         label: tokenLabel,
         hpBarBg,
@@ -447,6 +545,7 @@ export default function Tabletop({
         y: source.container.y + GRID_CELL_SIZE / 2,
         radius: source.radius,
         color: source.color,
+        tokenImageUrl: source.tokenImageUrl,
         hpCurrent: source.hpCurrent,
         hpMax: source.hpMax,
         rotationDeg: source.rotationDeg,
@@ -455,46 +554,6 @@ export default function Tabletop({
 
       if (duplicate) {
         setSelection([duplicate.id]);
-        rebindInteractionHandlers?.();
-        emitTokensChange();
-      }
-    };
-
-    const addEntity = (name: string) => {
-      const trimmedName = name.trim();
-      if (!trimmedName) return;
-
-      const idBase = `entity-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
-      let nextId = idBase;
-      let suffix = 1;
-      while (tokenRecords.some((token) => token.id === nextId)) {
-        suffix += 1;
-        nextId = `${idBase}-${suffix}`;
-      }
-
-      let spawnX = GRID_CELL_SIZE / 2;
-      let spawnY = GRID_CELL_SIZE / 2;
-      if (app && world) {
-        const centerX = app.screen.width / 2;
-        const centerY = app.screen.height / 2;
-        spawnX = snapToCellCenter((centerX - world.position.x) / world.scale.x);
-        spawnY = snapToCellCenter((centerY - world.position.y) / world.scale.y);
-      }
-
-      const color = ENTITY_COLORS[tokenRecords.length % ENTITY_COLORS.length];
-      const created = createTokenRecord({
-        id: nextId,
-        name: trimmedName,
-        x: spawnX,
-        y: spawnY,
-        radius: 18,
-        color,
-        hpCurrent: 10,
-        hpMax: 10,
-      });
-
-      if (created) {
-        setSelection([created.id]);
         rebindInteractionHandlers?.();
         emitTokensChange();
       }
@@ -517,11 +576,61 @@ export default function Tabletop({
       drawToken(token, selectedTokenIds.has(token.id));
     };
 
+    const syncPlayers = (nextPlayers: PlayerCharacter[], nextAssets: AssetLibraryItem[]) => {
+      if (!world) return;
+
+      const assetUrlById = new Map(nextAssets.map((asset) => [asset.id, asset.url]));
+      const existingById = new Map(tokenRecords.map((token) => [token.id, token]));
+      const nextTokenRecords: TokenRecord[] = [];
+
+      nextPlayers.forEach((player, index) => {
+        const existing = existingById.get(player.id);
+        const tokenImageUrl = player.tokenAssetId ? assetUrlById.get(player.tokenAssetId) ?? null : null;
+
+        if (existing) {
+          existing.name = player.name.trim() || `Player ${index + 1}`;
+          existing.color = parseHexColor(player.color, existing.color);
+          existing.tokenImageUrl = tokenImageUrl;
+          drawToken(existing, selectedTokenIds.has(existing.id));
+          nextTokenRecords.push(existing);
+          existingById.delete(player.id);
+          return;
+        }
+
+        const created = createTokenRecord({
+          id: player.id,
+          name: player.name.trim() || `Player ${index + 1}`,
+          x: GRID_CELL_SIZE / 2 + index * GRID_CELL_SIZE * 2,
+          y: GRID_CELL_SIZE / 2 + GRID_CELL_SIZE * 2,
+          radius: DEFAULT_PLAYER_RADIUS,
+          color: parseHexColor(player.color, 0x777777),
+          tokenImageUrl,
+          hpCurrent: DEFAULT_PLAYER_HP,
+          hpMax: DEFAULT_PLAYER_HP,
+        });
+
+        if (created) {
+          nextTokenRecords.push(created);
+        }
+      });
+
+      for (const staleToken of existingById.values()) {
+        stopTokenMotion(staleToken);
+        staleToken.container.destroy({ children: true });
+        selectedTokenIds.delete(staleToken.id);
+      }
+
+      tokenRecords = nextTokenRecords;
+      selectedTokenIds = new Set(
+        [...selectedTokenIds].filter((tokenId) => tokenRecords.some((token) => token.id === tokenId))
+      );
+      refreshTokenStyles();
+      rebindInteractionHandlers?.();
+      emitTokensChange();
+    };
+
     runContextActionRef.current = (action: TokenContextAction) => {
       switch (action.type) {
-        case "add":
-          addEntity(action.name);
-          break;
         case "delete":
           deleteTokenById(action.tokenId);
           break;
@@ -540,6 +649,8 @@ export default function Tabletop({
           break;
       }
     };
+
+    syncPlayersRef.current = syncPlayers;
 
     const setupInteractions = (canvas: HTMLCanvasElement, stage: Container, tokens: TokenRecord[]) => {
       let panning = false;
@@ -936,10 +1047,6 @@ export default function Tabletop({
       world.addChild(movementPreviewOverlay);
 
       tokenRecords = [];
-      for (const token of TOKEN_DEFINITIONS) {
-        createTokenRecord(token);
-      }
-      emitTokensChange();
 
       selectionOverlay = new Graphics();
       nextApp.stage.addChild(selectionOverlay);
@@ -949,6 +1056,7 @@ export default function Tabletop({
         if (detachInteractions) detachInteractions();
         detachInteractions = setupInteractions(canvas, nextApp.stage, tokenRecords);
       };
+      syncPlayers(playersRef.current, assetLibraryRef.current);
       rebindInteractionHandlers();
       detachKeyboard = setupKeyboardShortcuts();
       const detachTokenMotionTicker = setupTokenMotionTicker();
@@ -972,6 +1080,7 @@ export default function Tabletop({
       if (detachTokenMotionTicker) detachTokenMotionTicker();
       placeAssetAtClientRef.current = () => false;
       runContextActionRef.current = null;
+      syncPlayersRef.current = null;
       if (app) app.destroy(true, { children: true });
     };
   }, []);

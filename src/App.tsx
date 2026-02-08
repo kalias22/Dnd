@@ -1,78 +1,115 @@
-import { type CSSProperties, type ChangeEvent, useEffect, useRef, useState } from "react";
-import Tabletop, { type PlacingAsset, type TokenContextAction, type TokenSummary } from "./components/Tabletop";
+import { type CSSProperties, type ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
+import Tabletop, {
+  type AssetLibraryItem,
+  type PlacingAsset,
+  type PlayerCharacter,
+  type TokenContextAction,
+} from "./components/Tabletop";
 
-type ContextActionInput =
-  | { type: "add"; name: string }
-  | { type: "delete"; tokenId: string }
-  | { type: "duplicate"; tokenId: string }
-  | { type: "rename"; tokenId: string; name: string }
-  | { type: "setHp"; tokenId: string; hpCurrent: number; hpMax: number };
-
-type AssetImage = {
-  id: string;
+type AssetImage = AssetLibraryItem & {
   name: string;
-  url: string;
 };
 
 type AppMode = "home" | "create" | "play";
+
+const PLAYER_COLORS = ["#d35400", "#1abc9c", "#3498db", "#9b59b6", "#e74c3c", "#f1c40f"];
+
+const createDefaultPlayer = (index: number): PlayerCharacter => ({
+  id: `player-${crypto.randomUUID()}`,
+  name: `Player ${index}`,
+  color: PLAYER_COLORS[(index - 1) % PLAYER_COLORS.length],
+  tokenAssetId: null,
+});
+
+const mergeOrderWithPlayers = (previousOrder: string[], players: PlayerCharacter[]) => {
+  const playerIds = players.map((player) => player.id);
+  const playerIdSet = new Set(playerIds);
+  const kept = previousOrder.filter((playerId) => playerIdSet.has(playerId));
+  const keptSet = new Set(kept);
+  const appended = playerIds.filter((playerId) => !keptSet.has(playerId));
+  return [...kept, ...appended];
+};
+
+const sortOrderByInitiativeDesc = (order: string[], initiatives: Record<string, number>) => {
+  return [...order].sort((a, b) => {
+    const aValue = initiatives[a];
+    const bValue = initiatives[b];
+    if (typeof aValue === "number" && typeof bValue === "number") {
+      return bValue - aValue;
+    }
+    if (typeof aValue === "number") return -1;
+    if (typeof bValue === "number") return 1;
+    return 0;
+  });
+};
 
 export default function App() {
   const [mode, setMode] = useState<AppMode>("home");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [snapToGrid, setSnapToGrid] = useState(true);
   const [assetsOpen, setAssetsOpen] = useState(false);
-  const [entitiesOpen, setEntitiesOpen] = useState(false);
+  const [playersOpen, setPlayersOpen] = useState(true);
+  const [playSetupOpen, setPlaySetupOpen] = useState(false);
+  const [initiativeOpen, setInitiativeOpen] = useState(true);
+  const [assets, setAssets] = useState<AssetImage[]>([]);
+  const [players, setPlayers] = useState<PlayerCharacter[]>(() => [createDefaultPlayer(1), createDefaultPlayer(2)]);
+  const [initiativeById, setInitiativeById] = useState<Record<string, number>>({});
+  const [initiativeOrder, setInitiativeOrder] = useState<string[]>([]);
+  const [activeInitiativePlayerId, setActiveInitiativePlayerId] = useState<string | null>(null);
+  const [placingAsset, setPlacingAsset] = useState<PlacingAsset | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; tokenId: string } | null>(null);
   const [contextAction, setContextAction] = useState<TokenContextAction | null>(null);
-  const [assets, setAssets] = useState<AssetImage[]>([]);
-  const [placingAsset, setPlacingAsset] = useState<PlacingAsset | null>(null);
-  const [tokens, setTokens] = useState<TokenSummary[]>([]);
+
   const actionNonceRef = useRef(1);
   const contextMenuRef = useRef<HTMLDivElement | null>(null);
   const assetInputRef = useRef<HTMLInputElement | null>(null);
   const assetUrlsRef = useRef<string[]>([]);
+  const assetLibrary = useMemo<AssetLibraryItem[]>(() => assets.map((asset) => ({ id: asset.id, url: asset.url })), [assets]);
+  const sortedInitiativeOrder = useMemo(
+    () => sortOrderByInitiativeDesc(mergeOrderWithPlayers(initiativeOrder, players), initiativeById),
+    [initiativeOrder, initiativeById, players]
+  );
 
   useEffect(() => {
-    if (mode !== "create") {
+    if (mode === "play") {
+      setPlaySetupOpen(true);
+      setInitiativeOpen(true);
+    } else {
+      setPlaySetupOpen(false);
+      setInitiativeOpen(false);
+    }
+
+    if (mode === "create") {
+      setPlayersOpen(true);
+    } else {
+      setPlayersOpen(false);
       setAssetsOpen(false);
-      setEntitiesOpen(false);
       setPlacingAsset(null);
     }
   }, [mode]);
 
-  const closeContextMenu = () => {
-    setContextMenu(null);
-  };
-
-  const dispatchTokenAction = (action: ContextActionInput) => {
-    const nextAction: TokenContextAction = {
-      nonce: actionNonceRef.current++,
-      ...action,
-    };
-    setContextAction(nextAction);
-    closeContextMenu();
-  };
-
-  useEffect(() => {
-    if (!contextMenu) return;
-
-    const handleOutsidePointerDown = (event: PointerEvent) => {
-      if (event.button !== 0) return;
-
-      const target = event.target as Node | null;
-      if (target && contextMenuRef.current?.contains(target)) return;
-      closeContextMenu();
-    };
-
-    window.addEventListener("pointerdown", handleOutsidePointerDown);
-    return () => {
-      window.removeEventListener("pointerdown", handleOutsidePointerDown);
-    };
-  }, [contextMenu]);
-
   useEffect(() => {
     assetUrlsRef.current = assets.map((asset) => asset.url);
   }, [assets]);
+
+  useEffect(() => {
+    const playerIds = players.map((player) => player.id);
+    const playerIdSet = new Set(playerIds);
+
+    setInitiativeById((previous) => {
+      const next: Record<string, number> = {};
+      for (const playerId of playerIds) {
+        const value = previous[playerId];
+        if (typeof value === "number") {
+          next[playerId] = value;
+        }
+      }
+      return next;
+    });
+
+    setInitiativeOrder((previous) => mergeOrderWithPlayers(previous, players));
+    setActiveInitiativePlayerId((previous) => (previous && playerIdSet.has(previous) ? previous : null));
+  }, [players]);
 
   useEffect(() => {
     return () => {
@@ -81,6 +118,22 @@ export default function App() {
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (!contextMenu) return;
+
+    const handleOutsidePointerDown = (event: PointerEvent) => {
+      if (event.button !== 0) return;
+      const target = event.target as Node | null;
+      if (target && contextMenuRef.current?.contains(target)) return;
+      setContextMenu(null);
+    };
+
+    window.addEventListener("pointerdown", handleOutsidePointerDown);
+    return () => {
+      window.removeEventListener("pointerdown", handleOutsidePointerDown);
+    };
+  }, [contextMenu]);
 
   useEffect(() => {
     if (!placingAsset) return;
@@ -97,16 +150,45 @@ export default function App() {
     };
   }, [placingAsset]);
 
-  const handleRenameEntity = (tokenId: string) => {
-    const nextName = window.prompt("Rename entity:");
-    if (nextName === null) return;
-
-    const name = nextName.trim();
-    if (!name) return;
-    dispatchTokenAction({ type: "rename", tokenId, name });
+  const addPlayer = () => {
+    setPlayers((previous) => [...previous, createDefaultPlayer(previous.length + 1)]);
   };
 
-  const handleSetEntityHp = (tokenId: string) => {
+  const updatePlayer = (playerId: string, updates: Partial<PlayerCharacter>) => {
+    setPlayers((previous) => previous.map((player) => (player.id === playerId ? { ...player, ...updates } : player)));
+  };
+
+  const duplicatePlayer = (playerId: string) => {
+    setPlayers((previous) => {
+      const source = previous.find((player) => player.id === playerId);
+      if (!source) return previous;
+
+      return [
+        ...previous,
+        {
+          ...source,
+          id: `player-${crypto.randomUUID()}`,
+          name: `${source.name} Copy`,
+        },
+      ];
+    });
+  };
+
+  const deletePlayer = (playerId: string) => {
+    setPlayers((previous) => previous.filter((player) => player.id !== playerId));
+  };
+
+  const renamePlayerPrompt = (playerId: string) => {
+    const source = players.find((player) => player.id === playerId);
+    if (!source) return;
+    const nextName = window.prompt("Rename player:", source.name);
+    if (nextName === null) return;
+    const trimmed = nextName.trim();
+    if (!trimmed) return;
+    updatePlayer(playerId, { name: trimmed });
+  };
+
+  const setHpPrompt = (tokenId: string) => {
     const value = window.prompt('Set HP as "current/max"', "10/10");
     if (value === null) return;
 
@@ -115,19 +197,15 @@ export default function App() {
 
     const hpCurrent = Number(match[1]);
     const hpMax = Number(match[2]);
-    if (hpMax <= 0) return;
+    if (!Number.isFinite(hpCurrent) || !Number.isFinite(hpMax) || hpMax <= 0) return;
 
-    dispatchTokenAction({ type: "setHp", tokenId, hpCurrent, hpMax });
-  };
-
-  const handleAddEntity = () => {
-    let nextIndex = tokens.length + 1;
-    const existingNames = new Set(tokens.map((token) => token.name.toLowerCase()));
-    while (existingNames.has(`entity ${nextIndex}`)) {
-      nextIndex += 1;
-    }
-
-    dispatchTokenAction({ type: "add", name: `Entity ${nextIndex}` });
+    setContextAction({
+      nonce: actionNonceRef.current++,
+      type: "setHp",
+      tokenId,
+      hpCurrent,
+      hpMax,
+    });
   };
 
   const handleImportImages = () => {
@@ -149,6 +227,38 @@ export default function App() {
 
     setAssets((previous) => [...previous, ...imported]);
     event.target.value = "";
+  };
+
+  const rollAllInitiative = () => {
+    const rolled: Record<string, number> = {};
+    for (const player of players) {
+      rolled[player.id] = Math.floor(Math.random() * 20) + 1;
+    }
+
+    setInitiativeById(rolled);
+    setInitiativeOrder((previous) => sortOrderByInitiativeDesc(mergeOrderWithPlayers(previous, players), rolled));
+    setActiveInitiativePlayerId(null);
+  };
+
+  const nextInitiativeTurn = () => {
+    if (sortedInitiativeOrder.length === 0) {
+      setActiveInitiativePlayerId(null);
+      return;
+    }
+
+    setInitiativeOrder(sortedInitiativeOrder);
+    setActiveInitiativePlayerId((current) => {
+      if (!current) return sortedInitiativeOrder[0];
+      const currentIndex = sortedInitiativeOrder.indexOf(current);
+      if (currentIndex < 0) return sortedInitiativeOrder[0];
+      return sortedInitiativeOrder[(currentIndex + 1) % sortedInitiativeOrder.length];
+    });
+  };
+
+  const clearInitiativeTracker = () => {
+    setInitiativeById({});
+    setInitiativeOrder([]);
+    setActiveInitiativePlayerId(null);
   };
 
   if (mode === "home") {
@@ -195,27 +305,28 @@ export default function App() {
 
   return (
     <div style={{ position: "fixed", inset: 0 }}>
+      <input
+        ref={assetInputRef}
+        type="file"
+        accept="image/*"
+        multiple
+        onChange={handleAssetFilesChange}
+        style={{ display: "none" }}
+      />
+
       <Tabletop
         snapToGrid={snapToGrid}
         contextAction={contextAction}
         placingAsset={mode === "create" ? placingAsset : null}
+        players={players}
+        assetLibrary={assetLibrary}
         onPlacedAsset={mode === "create" ? () => setPlacingAsset(null) : undefined}
-        onTokensChange={setTokens}
         onTokenContextMenu={(tokenId, x, y) => setContextMenu({ tokenId, x, y })}
-        onRequestCloseContextMenu={closeContextMenu}
+        onRequestCloseContextMenu={() => setContextMenu(null)}
       />
 
       {mode === "create" && (
         <>
-          <input
-            ref={assetInputRef}
-            type="file"
-            accept="image/*"
-            multiple
-            onChange={handleAssetFilesChange}
-            style={{ display: "none" }}
-          />
-
           <div
             style={{
               position: "fixed",
@@ -231,11 +342,7 @@ export default function App() {
               transition: "transform 160ms ease, top 120ms ease",
             }}
           >
-            <button
-              type="button"
-              onClick={() => setAssetsOpen((open) => !open)}
-              style={panelToggleButtonStyle}
-            >
+            <button type="button" onClick={() => setAssetsOpen((open) => !open)} style={panelToggleButtonStyle}>
               {assetsOpen ? "Hide" : "Assets"}
             </button>
 
@@ -294,9 +401,7 @@ export default function App() {
                       <button
                         type="button"
                         onPointerDown={(event) => event.stopPropagation()}
-                        onClick={() => {
-                          setPlacingAsset({ id: asset.id, name: asset.name, url: asset.url });
-                        }}
+                        onClick={() => setPlacingAsset({ id: asset.id, name: asset.name, url: asset.url })}
                         style={{
                           ...trackerButtonStyle,
                           padding: "4px 6px",
@@ -320,52 +425,76 @@ export default function App() {
               top: 56,
               left: 12,
               zIndex: 1100,
-              width: 354,
+              width: 364,
               display: "flex",
               alignItems: "flex-start",
               gap: 6,
-              transform: entitiesOpen ? "translateX(0)" : "translateX(-266px)",
+              transform: playersOpen ? "translateX(0)" : "translateX(-276px)",
               transition: "transform 160ms ease",
             }}
           >
-            <div style={sidePanelStyle}>
-              <div style={{ fontSize: 15, fontWeight: 700 }}>Entities</div>
-              <button type="button" onClick={handleAddEntity} style={trackerButtonStyle}>
-                Add Entity
+            <div style={{ ...sidePanelStyle, width: 270 }}>
+              <div style={{ fontSize: 15, fontWeight: 700 }}>Players</div>
+              <button type="button" onClick={addPlayer} style={trackerButtonStyle}>
+                Add Player
               </button>
               <div
                 style={{
                   border: "1px solid #3a3a3a",
                   borderRadius: 8,
                   overflowY: "auto",
-                  maxHeight: 240,
+                  maxHeight: "calc(100vh - 180px)",
+                  display: "grid",
                 }}
               >
-                {tokens.length === 0 ? (
-                  <div style={{ padding: 10, fontSize: 13, color: "#b6b6b6" }}>No entities</div>
+                {players.length === 0 ? (
+                  <div style={{ padding: 10, fontSize: 12, color: "#b6b6b6" }}>No players</div>
                 ) : (
-                  tokens.map((token) => (
+                  players.map((player) => (
                     <div
-                      key={token.id}
+                      key={player.id}
                       style={{
-                        padding: "7px 9px",
-                        fontSize: 13,
+                        display: "grid",
+                        gap: 6,
+                        padding: 8,
                         borderTop: "1px solid rgba(255,255,255,0.06)",
-                        whiteSpace: "nowrap",
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
                       }}
-                      title={token.name}
                     >
-                      {token.name}
+                      <input
+                        type="text"
+                        value={player.name}
+                        onChange={(event) => updatePlayer(player.id, { name: event.target.value })}
+                        style={inputStyle}
+                      />
+                      <div style={{ display: "flex", gap: 6 }}>
+                        <input
+                          type="color"
+                          value={player.color}
+                          onChange={(event) => updatePlayer(player.id, { color: event.target.value })}
+                          style={{ width: 42, height: 28, padding: 0, border: "1px solid #3a3a3a", borderRadius: 6 }}
+                        />
+                        <select
+                          value={player.tokenAssetId ?? ""}
+                          onChange={(event) =>
+                            updatePlayer(player.id, { tokenAssetId: event.target.value || null })
+                          }
+                          style={{ ...inputStyle, minHeight: 28 }}
+                        >
+                          <option value="">No image (color token)</option>
+                          {assets.map((asset) => (
+                            <option key={asset.id} value={asset.id}>
+                              {asset.name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
                     </div>
                   ))
                 )}
               </div>
             </div>
-
-            <button type="button" onClick={() => setEntitiesOpen((open) => !open)} style={panelToggleButtonStyle}>
-              {entitiesOpen ? "Hide" : "Entities"}
+            <button type="button" onClick={() => setPlayersOpen((open) => !open)} style={panelToggleButtonStyle}>
+              {playersOpen ? "Hide" : "Players"}
             </button>
           </div>
 
@@ -409,6 +538,130 @@ export default function App() {
         </>
       )}
 
+      {mode === "play" && playSetupOpen && (
+        <div
+          style={{
+            position: "fixed",
+            top: 56,
+            left: 12,
+            zIndex: 1110,
+            width: "min(360px, calc(100vw - 24px))",
+            border: "1px solid #4a4a4a",
+            borderRadius: 10,
+            background: "rgba(18,18,18,0.94)",
+            color: "#f2f2f2",
+            padding: 10,
+            display: "grid",
+            gap: 10,
+            fontFamily: "sans-serif",
+          }}
+        >
+          <div style={{ fontSize: 15, fontWeight: 700 }}>Player Setup</div>
+          <div style={{ fontSize: 12, color: "#cfcfcf" }}>Choose token images, then press Start.</div>
+          <button type="button" onClick={handleImportImages} style={trackerButtonStyle}>
+            Import Images
+          </button>
+          <div style={{ display: "grid", gap: 8, maxHeight: 300, overflowY: "auto" }}>
+            {players.map((player) => (
+              <div key={player.id} style={{ display: "grid", gap: 4 }}>
+                <div style={{ fontSize: 13 }}>{player.name}</div>
+                <select
+                  value={player.tokenAssetId ?? ""}
+                  onChange={(event) => updatePlayer(player.id, { tokenAssetId: event.target.value || null })}
+                  style={inputStyle}
+                >
+                  <option value="">No image (color token)</option>
+                  {assets.map((asset) => (
+                    <option key={asset.id} value={asset.id}>
+                      {asset.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ))}
+          </div>
+          <button type="button" onClick={() => setPlaySetupOpen(false)} style={trackerButtonStyle}>
+            Start
+          </button>
+        </div>
+      )}
+
+      {mode === "play" && (
+        <div
+          style={{
+            position: "fixed",
+            left: 12,
+            bottom: 12,
+            zIndex: 1110,
+            width: 354,
+            display: "flex",
+            alignItems: "flex-end",
+            gap: 6,
+            transform: initiativeOpen ? "translateX(0)" : "translateX(-266px)",
+            transition: "transform 160ms ease",
+          }}
+        >
+          <div style={{ ...sidePanelStyle, width: 260 }}>
+            <div style={{ fontSize: 15, fontWeight: 700 }}>Initiative</div>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              <button type="button" onClick={rollAllInitiative} style={trackerButtonStyle}>
+                Roll All
+              </button>
+              <button type="button" onClick={nextInitiativeTurn} style={trackerButtonStyle}>
+                Next
+              </button>
+              <button type="button" onClick={clearInitiativeTracker} style={trackerButtonStyle}>
+                Clear
+              </button>
+            </div>
+            <div
+              style={{
+                border: "1px solid #3a3a3a",
+                borderRadius: 8,
+                overflowY: "auto",
+                maxHeight: 240,
+              }}
+            >
+              {sortedInitiativeOrder.length === 0 ? (
+                <div style={{ padding: 10, fontSize: 12, color: "#b6b6b6" }}>No players</div>
+              ) : (
+                sortedInitiativeOrder.map((playerId) => {
+                  const player = players.find((item) => item.id === playerId);
+                  if (!player) return null;
+                  const isActive = player.id === activeInitiativePlayerId;
+                  const initiative = initiativeById[player.id];
+                  return (
+                    <div
+                      key={player.id}
+                      style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        gap: 8,
+                        padding: "7px 9px",
+                        fontSize: 13,
+                        background: isActive ? "rgba(255,240,122,0.22)" : "transparent",
+                        borderTop: "1px solid rgba(255,255,255,0.06)",
+                      }}
+                    >
+                      <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                        {player.name}
+                      </span>
+                      <span style={{ minWidth: 24, textAlign: "right", fontWeight: 700 }}>
+                        {typeof initiative === "number" ? initiative : "-"}
+                      </span>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+          <button type="button" onClick={() => setInitiativeOpen((open) => !open)} style={panelToggleButtonStyle}>
+            {initiativeOpen ? "Hide" : "Initiative"}
+          </button>
+        </div>
+      )}
+
       {contextMenu && (
         <div
           ref={contextMenuRef}
@@ -432,23 +685,43 @@ export default function App() {
         >
           <button
             type="button"
-            onClick={() => dispatchTokenAction({ type: "delete", tokenId: contextMenu.tokenId })}
+            onClick={() => {
+              duplicatePlayer(contextMenu.tokenId);
+              setContextMenu(null);
+            }}
             style={menuButtonStyle}
           >
-            Delete entity
+            Duplicate player
           </button>
           <button
             type="button"
-            onClick={() => dispatchTokenAction({ type: "duplicate", tokenId: contextMenu.tokenId })}
+            onClick={() => {
+              renamePlayerPrompt(contextMenu.tokenId);
+              setContextMenu(null);
+            }}
             style={menuButtonStyle}
           >
-            Duplicate entity
+            Rename player
           </button>
-          <button type="button" onClick={() => handleRenameEntity(contextMenu.tokenId)} style={menuButtonStyle}>
-            Rename entity
-          </button>
-          <button type="button" onClick={() => handleSetEntityHp(contextMenu.tokenId)} style={menuButtonStyle}>
+          <button
+            type="button"
+            onClick={() => {
+              setHpPrompt(contextMenu.tokenId);
+              setContextMenu(null);
+            }}
+            style={menuButtonStyle}
+          >
             Set HP
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              deletePlayer(contextMenu.tokenId);
+              setContextMenu(null);
+            }}
+            style={menuButtonStyle}
+          >
+            Delete player
           </button>
         </div>
       )}
@@ -458,7 +731,7 @@ export default function App() {
           position: "fixed",
           top: 12,
           left: 12,
-          zIndex: 1110,
+          zIndex: 1120,
         }}
       >
         <button type="button" onClick={() => setMode("home")} style={trackerButtonStyle}>
@@ -471,7 +744,7 @@ export default function App() {
           position: "fixed",
           top: 12,
           right: 12,
-          zIndex: 1000,
+          zIndex: 1130,
           display: "flex",
           flexDirection: "column",
           alignItems: "flex-end",
@@ -594,4 +867,14 @@ const sidePanelStyle: CSSProperties = {
   gridAutoFlow: "row",
   gap: 10,
   fontFamily: "sans-serif",
+};
+
+const inputStyle: CSSProperties = {
+  width: "100%",
+  border: "1px solid #3a3a3a",
+  borderRadius: 6,
+  background: "rgba(28,28,28,0.95)",
+  color: "#f2f2f2",
+  fontSize: 12,
+  padding: "5px 7px",
 };
