@@ -1,12 +1,13 @@
 import { type CSSProperties, type ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
-import Tabletop, {
+import TabletopViewport, {
   type AssetLibraryItem,
   type PlacingAsset,
   type PlayerCharacter,
   type TileMaterial,
+  type TileRotationMode,
   type TileMaterialTextures,
   type TokenContextAction,
-} from "./components/Tabletop";
+} from "./ui/components/TabletopViewport";
 
 type AssetImage = AssetLibraryItem & {
   name: string;
@@ -17,7 +18,18 @@ type AppMode = "home" | "create" | "play";
 
 const PLAYER_COLORS = ["#d35400", "#1abc9c", "#3498db", "#9b59b6", "#e74c3c", "#f1c40f"];
 
-type TileMaterialImportRole = "base" | "overlay" | "corner";
+type TileMaterialImportRole =
+  | "base"
+  | "overlay"
+  | "corner"
+  | "overlayHorizontal"
+  | "overlayVertical"
+  | "cornerHorizontal"
+  | "cornerVertical"
+  | "cornerNe"
+  | "cornerNw"
+  | "cornerSe"
+  | "cornerSw";
 type TileMaterialImportInfo = {
   baseKey: string;
   baseName: string;
@@ -28,6 +40,21 @@ type TileMaterialImportGroup = {
   base?: AssetImage;
   overlay?: AssetImage;
   corner?: AssetImage;
+  overlayHorizontal?: AssetImage;
+  overlayVertical?: AssetImage;
+  cornerHorizontal?: AssetImage;
+  cornerVertical?: AssetImage;
+  cornerNe?: AssetImage;
+  cornerNw?: AssetImage;
+  cornerSe?: AssetImage;
+  cornerSw?: AssetImage;
+};
+
+type MaterialTextureField = {
+  key: keyof TileMaterialTextures;
+  label: string;
+  required: boolean;
+  emptyLabel?: string;
 };
 
 const stripFileExtension = (fileName: string) => fileName.replace(/\.[^/.]+$/, "");
@@ -37,14 +64,44 @@ const parseTileMaterialImportInfo = (assetName: string): TileMaterialImportInfo 
   if (!stem) return null;
 
   const lowerStem = stem.toLowerCase();
+  const roleSuffixes: Array<{ suffix: string; role: TileMaterialImportRole }> = [
+    { suffix: "_overlay_ne_corner", role: "cornerNe" },
+    { suffix: "_overlay_nw_corner", role: "cornerNw" },
+    { suffix: "_overlay_se_corner", role: "cornerSe" },
+    { suffix: "_overlay_sw_corner", role: "cornerSw" },
+    { suffix: "_overlay_corner_ne", role: "cornerNe" },
+    { suffix: "_overlay_corner_nw", role: "cornerNw" },
+    { suffix: "_overlay_corner_se", role: "cornerSe" },
+    { suffix: "_overlay_corner_sw", role: "cornerSw" },
+  ];
+  const verticalCornerSuffix = "_overlay_vertical_corner";
+  const horizontalCornerSuffix = "_overlay_horizontal_corner";
   const cornerSuffix = "_overlay_corner";
+  const verticalSuffix = "_overlay_vertical";
+  const horizontalSuffix = "_overlay_horizontal";
   const overlaySuffix = "_overlay";
 
   let role: TileMaterialImportRole = "base";
   let baseName = stem;
-  if (lowerStem.endsWith(cornerSuffix)) {
+  const matchedDirectionalCorner = roleSuffixes.find(({ suffix }) => lowerStem.endsWith(suffix));
+  if (matchedDirectionalCorner) {
+    role = matchedDirectionalCorner.role;
+    baseName = stem.slice(0, stem.length - matchedDirectionalCorner.suffix.length);
+  } else if (lowerStem.endsWith(verticalCornerSuffix)) {
+    role = "cornerVertical";
+    baseName = stem.slice(0, stem.length - verticalCornerSuffix.length);
+  } else if (lowerStem.endsWith(horizontalCornerSuffix)) {
+    role = "cornerHorizontal";
+    baseName = stem.slice(0, stem.length - horizontalCornerSuffix.length);
+  } else if (lowerStem.endsWith(cornerSuffix)) {
     role = "corner";
     baseName = stem.slice(0, stem.length - cornerSuffix.length);
+  } else if (lowerStem.endsWith(verticalSuffix)) {
+    role = "overlayVertical";
+    baseName = stem.slice(0, stem.length - verticalSuffix.length);
+  } else if (lowerStem.endsWith(horizontalSuffix)) {
+    role = "overlayHorizontal";
+    baseName = stem.slice(0, stem.length - horizontalSuffix.length);
   } else if (lowerStem.endsWith(overlaySuffix)) {
     role = "overlay";
     baseName = stem.slice(0, stem.length - overlaySuffix.length);
@@ -73,28 +130,100 @@ const buildTileMaterialImportGroups = (assets: AssetImage[]) => {
     if (info.role === "base") group.base = asset;
     if (info.role === "overlay") group.overlay = asset;
     if (info.role === "corner") group.corner = asset;
+    if (info.role === "overlayHorizontal") group.overlayHorizontal = asset;
+    if (info.role === "overlayVertical") group.overlayVertical = asset;
+    if (info.role === "cornerHorizontal") group.cornerHorizontal = asset;
+    if (info.role === "cornerVertical") group.cornerVertical = asset;
+    if (info.role === "cornerNe") group.cornerNe = asset;
+    if (info.role === "cornerNw") group.cornerNw = asset;
+    if (info.role === "cornerSe") group.cornerSe = asset;
+    if (info.role === "cornerSw") group.cornerSw = asset;
   }
   return groups;
 };
 
-const MATERIAL_TEXTURE_FIELDS: Array<{ key: keyof TileMaterialTextures; label: string }> = [
-  { key: "baseAssetId", label: "Base Texture" },
-  { key: "overlayAssetId", label: "Blend Overlay" },
-  { key: "cornerOverlayAssetId", label: "Corner Overlay" },
+const MATERIAL_TEXTURE_FIELDS: MaterialTextureField[] = [
+  { key: "baseAssetId", label: "Base Texture", required: true },
+  { key: "overlayAssetId", label: "Blend Overlay", required: false, emptyLabel: "No overlay" },
+  { key: "cornerOverlayAssetId", label: "Corner Overlay", required: false, emptyLabel: "No corner overlay" },
+  {
+    key: "overlayHorizontalAssetId",
+    label: "Overlay Horizontal (optional)",
+    required: false,
+    emptyLabel: "Use Blend Overlay",
+  },
+  {
+    key: "overlayVerticalAssetId",
+    label: "Overlay Vertical (optional)",
+    required: false,
+    emptyLabel: "Use Blend Overlay",
+  },
+  {
+    key: "cornerOverlayHorizontalAssetId",
+    label: "Corner Horizontal (optional)",
+    required: false,
+    emptyLabel: "Use Corner Overlay",
+  },
+  {
+    key: "cornerOverlayVerticalAssetId",
+    label: "Corner Vertical (optional)",
+    required: false,
+    emptyLabel: "Use Corner Overlay",
+  },
+  {
+    key: "cornerOverlayNeAssetId",
+    label: "Corner NE (optional)",
+    required: false,
+    emptyLabel: "Use Corner Overlay",
+  },
+  {
+    key: "cornerOverlayNwAssetId",
+    label: "Corner NW (optional)",
+    required: false,
+    emptyLabel: "Use Corner Overlay",
+  },
+  {
+    key: "cornerOverlaySeAssetId",
+    label: "Corner SE (optional)",
+    required: false,
+    emptyLabel: "Use Corner Overlay",
+  },
+  {
+    key: "cornerOverlaySwAssetId",
+    label: "Corner SW (optional)",
+    required: false,
+    emptyLabel: "Use Corner Overlay",
+  },
 ];
 
 const createEmptyMaterialTextures = (): TileMaterialTextures => ({
   baseAssetId: "",
   overlayAssetId: "",
   cornerOverlayAssetId: "",
+  overlayHorizontalAssetId: "",
+  overlayVerticalAssetId: "",
+  cornerOverlayHorizontalAssetId: "",
+  cornerOverlayVerticalAssetId: "",
+  cornerOverlayNeAssetId: "",
+  cornerOverlayNwAssetId: "",
+  cornerOverlaySeAssetId: "",
+  cornerOverlaySwAssetId: "",
 });
 
 const createMaterialTextureDefaults = (assets: AssetImage[]): TileMaterialTextures => {
   const firstAssetId = assets[0]?.id ?? "";
   return {
     baseAssetId: firstAssetId,
-    overlayAssetId: firstAssetId,
-    cornerOverlayAssetId: firstAssetId,
+    overlayAssetId: "",
+    cornerOverlayAssetId: "",
+    overlayHorizontalAssetId: "",
+    overlayVerticalAssetId: "",
+    cornerOverlayHorizontalAssetId: "",
+    cornerOverlayVerticalAssetId: "",
+    cornerOverlayNeAssetId: "",
+    cornerOverlayNwAssetId: "",
+    cornerOverlaySeAssetId: "",
+    cornerOverlaySwAssetId: "",
   };
 };
 
@@ -147,6 +276,7 @@ export default function App() {
   const [editingMaterialId, setEditingMaterialId] = useState<string | null>(null);
   const [materialNameInput, setMaterialNameInput] = useState("");
   const [materialPriorityInput, setMaterialPriorityInput] = useState("0");
+  const [materialRotationModeInput, setMaterialRotationModeInput] = useState<TileRotationMode>("random90");
   const [materialTextureInput, setMaterialTextureInput] = useState<TileMaterialTextures>(() =>
     createEmptyMaterialTextures()
   );
@@ -162,9 +292,17 @@ export default function App() {
   const materialTextureAssetIds = useMemo(() => {
     const ids = new Set<string>();
     for (const material of materials) {
-      ids.add(material.textures.baseAssetId);
-      ids.add(material.textures.overlayAssetId);
-      ids.add(material.textures.cornerOverlayAssetId);
+      if (material.textures.baseAssetId) ids.add(material.textures.baseAssetId);
+      if (material.textures.overlayAssetId) ids.add(material.textures.overlayAssetId);
+      if (material.textures.cornerOverlayAssetId) ids.add(material.textures.cornerOverlayAssetId);
+      if (material.textures.overlayHorizontalAssetId) ids.add(material.textures.overlayHorizontalAssetId);
+      if (material.textures.overlayVerticalAssetId) ids.add(material.textures.overlayVerticalAssetId);
+      if (material.textures.cornerOverlayHorizontalAssetId) ids.add(material.textures.cornerOverlayHorizontalAssetId);
+      if (material.textures.cornerOverlayVerticalAssetId) ids.add(material.textures.cornerOverlayVerticalAssetId);
+      if (material.textures.cornerOverlayNeAssetId) ids.add(material.textures.cornerOverlayNeAssetId);
+      if (material.textures.cornerOverlayNwAssetId) ids.add(material.textures.cornerOverlayNwAssetId);
+      if (material.textures.cornerOverlaySeAssetId) ids.add(material.textures.cornerOverlaySeAssetId);
+      if (material.textures.cornerOverlaySwAssetId) ids.add(material.textures.cornerOverlaySwAssetId);
     }
     return ids;
   }, [materials]);
@@ -215,10 +353,18 @@ export default function App() {
       const next: TileMaterialTextures = { ...previous };
       let changed = false;
 
-      for (const { key } of MATERIAL_TEXTURE_FIELDS) {
+      for (const { key, required } of MATERIAL_TEXTURE_FIELDS) {
         const selectedAssetId = previous[key];
-        if (!selectedAssetId || !validAssetIds.has(selectedAssetId)) {
-          next[key] = fallbackTextures[key];
+        if (!selectedAssetId) {
+          if (required && fallbackTextures[key] !== selectedAssetId) {
+            next[key] = fallbackTextures[key];
+            changed = true;
+          }
+          continue;
+        }
+
+        if (!validAssetIds.has(selectedAssetId)) {
+          next[key] = required ? fallbackTextures[key] : "";
           changed = true;
         }
       }
@@ -402,13 +548,44 @@ export default function App() {
         const nextMaterials = [...previous];
         for (const baseKey of touchedBaseKeys) {
           const group = groupedAssets.get(baseKey);
-          if (!group?.base || !group.overlay) continue;
+          if (!group?.base) continue;
+
+          const mainOverlay = group.overlay ?? group.overlayHorizontal ?? group.overlayVertical;
+          const cornerOverlay =
+            group.corner ??
+            group.cornerNe ??
+            group.cornerNw ??
+            group.cornerSe ??
+            group.cornerSw ??
+            group.cornerHorizontal ??
+            group.cornerVertical ??
+            null;
 
           const textures: TileMaterialTextures = {
             baseAssetId: group.base.id,
-            overlayAssetId: group.overlay.id,
-            cornerOverlayAssetId: (group.corner ?? group.overlay).id,
+            overlayAssetId: mainOverlay?.id ?? "",
+            cornerOverlayAssetId: cornerOverlay?.id ?? "",
+            overlayHorizontalAssetId: group.overlayHorizontal?.id ?? "",
+            overlayVerticalAssetId: group.overlayVertical?.id ?? "",
+            cornerOverlayHorizontalAssetId: group.cornerHorizontal?.id ?? "",
+            cornerOverlayVerticalAssetId: group.cornerVertical?.id ?? "",
+            cornerOverlayNeAssetId: group.cornerNe?.id ?? "",
+            cornerOverlayNwAssetId: group.cornerNw?.id ?? "",
+            cornerOverlaySeAssetId: group.cornerSe?.id ?? "",
+            cornerOverlaySwAssetId: group.cornerSw?.id ?? "",
           };
+          const hasAnyOverlayTexture = Boolean(
+            textures.overlayAssetId ||
+              textures.cornerOverlayAssetId ||
+              textures.overlayHorizontalAssetId ||
+              textures.overlayVerticalAssetId ||
+              textures.cornerOverlayHorizontalAssetId ||
+              textures.cornerOverlayVerticalAssetId ||
+              textures.cornerOverlayNeAssetId ||
+              textures.cornerOverlayNwAssetId ||
+              textures.cornerOverlaySeAssetId ||
+              textures.cornerOverlaySwAssetId
+          );
 
           const existingMaterialIndex = nextMaterials.findIndex(
             (material) => material.name.trim().toLowerCase() === baseKey
@@ -417,6 +594,7 @@ export default function App() {
           if (existingMaterialIndex >= 0) {
             nextMaterials[existingMaterialIndex] = {
               ...nextMaterials[existingMaterialIndex],
+              noOverlay: !hasAnyOverlayTexture,
               textures,
             };
           } else {
@@ -424,6 +602,8 @@ export default function App() {
               id: `material-${crypto.randomUUID()}`,
               name: group.baseName,
               priority: 0,
+              rotationMode: "random90",
+              noOverlay: !hasAnyOverlayTexture,
               textures,
             });
           }
@@ -438,11 +618,56 @@ export default function App() {
   const updateMaterialTextureInput = (key: keyof TileMaterialTextures, assetId: string) => {
     setMaterialTextureInput((previous) => ({ ...previous, [key]: assetId }));
   };
+  const noOverlayInput =
+    materialTextureInput.overlayAssetId === "" &&
+    materialTextureInput.cornerOverlayAssetId === "" &&
+    materialTextureInput.overlayHorizontalAssetId === "" &&
+    materialTextureInput.overlayVerticalAssetId === "" &&
+    materialTextureInput.cornerOverlayHorizontalAssetId === "" &&
+    materialTextureInput.cornerOverlayVerticalAssetId === "" &&
+    materialTextureInput.cornerOverlayNeAssetId === "" &&
+    materialTextureInput.cornerOverlayNwAssetId === "" &&
+    materialTextureInput.cornerOverlaySeAssetId === "" &&
+    materialTextureInput.cornerOverlaySwAssetId === "";
+  const setNoOverlayInput = (noOverlay: boolean) => {
+    if (noOverlay) {
+      setMaterialTextureInput((previous) => ({
+        ...previous,
+        overlayAssetId: "",
+        cornerOverlayAssetId: "",
+        overlayHorizontalAssetId: "",
+        overlayVerticalAssetId: "",
+        cornerOverlayHorizontalAssetId: "",
+        cornerOverlayVerticalAssetId: "",
+        cornerOverlayNeAssetId: "",
+        cornerOverlayNwAssetId: "",
+        cornerOverlaySeAssetId: "",
+        cornerOverlaySwAssetId: "",
+      }));
+      return;
+    }
+
+    const fallbackId = assets[0]?.id ?? "";
+    setMaterialTextureInput((previous) => ({
+      ...previous,
+      overlayAssetId: previous.overlayAssetId || fallbackId,
+      cornerOverlayAssetId: previous.cornerOverlayAssetId || "",
+      overlayHorizontalAssetId: previous.overlayHorizontalAssetId || "",
+      overlayVerticalAssetId: previous.overlayVerticalAssetId || "",
+      cornerOverlayHorizontalAssetId: previous.cornerOverlayHorizontalAssetId || "",
+      cornerOverlayVerticalAssetId: previous.cornerOverlayVerticalAssetId || "",
+      cornerOverlayNeAssetId: previous.cornerOverlayNeAssetId || "",
+      cornerOverlayNwAssetId: previous.cornerOverlayNwAssetId || "",
+      cornerOverlaySeAssetId: previous.cornerOverlaySeAssetId || "",
+      cornerOverlaySwAssetId: previous.cornerOverlaySwAssetId || "",
+    }));
+  };
 
   const resetMaterialForm = () => {
     setEditingMaterialId(null);
     setMaterialNameInput("");
     setMaterialPriorityInput("0");
+    setMaterialRotationModeInput("random90");
     setMaterialTextureInput(createMaterialTextureDefaults(assets));
   };
 
@@ -450,10 +675,19 @@ export default function App() {
     setEditingMaterialId(material.id);
     setMaterialNameInput(material.name);
     setMaterialPriorityInput(String(material.priority));
+    setMaterialRotationModeInput(material.rotationMode ?? "random90");
     setMaterialTextureInput({
       baseAssetId: material.textures.baseAssetId,
       overlayAssetId: material.textures.overlayAssetId,
-      cornerOverlayAssetId: material.textures.cornerOverlayAssetId || material.textures.overlayAssetId,
+      cornerOverlayAssetId: material.textures.cornerOverlayAssetId || "",
+      overlayHorizontalAssetId: material.textures.overlayHorizontalAssetId || "",
+      overlayVerticalAssetId: material.textures.overlayVerticalAssetId || "",
+      cornerOverlayHorizontalAssetId: material.textures.cornerOverlayHorizontalAssetId || "",
+      cornerOverlayVerticalAssetId: material.textures.cornerOverlayVerticalAssetId || "",
+      cornerOverlayNeAssetId: material.textures.cornerOverlayNeAssetId || "",
+      cornerOverlayNwAssetId: material.textures.cornerOverlayNwAssetId || "",
+      cornerOverlaySeAssetId: material.textures.cornerOverlaySeAssetId || "",
+      cornerOverlaySwAssetId: material.textures.cornerOverlaySwAssetId || "",
     });
   };
 
@@ -464,9 +698,13 @@ export default function App() {
     const priority = Number.isFinite(parsedPriority) ? Math.trunc(parsedPriority) : 0;
 
     const validAssetIds = new Set(assets.map((asset) => asset.id));
-    for (const { key } of MATERIAL_TEXTURE_FIELDS) {
+    for (const { key, required } of MATERIAL_TEXTURE_FIELDS) {
       const selectedAssetId = materialTextureInput[key];
-      if (!selectedAssetId || !validAssetIds.has(selectedAssetId)) {
+      if (!selectedAssetId) {
+        if (!required) continue;
+        return;
+      }
+      if (!validAssetIds.has(selectedAssetId)) {
         return;
       }
     }
@@ -475,6 +713,8 @@ export default function App() {
       id: `material-${crypto.randomUUID()}`,
       name: trimmedName,
       priority,
+      rotationMode: materialRotationModeInput,
+      noOverlay: noOverlayInput,
       textures: { ...materialTextureInput },
     };
 
@@ -486,6 +726,8 @@ export default function App() {
                 ...existing,
                 name: trimmedName,
                 priority,
+                rotationMode: materialRotationModeInput,
+                noOverlay: noOverlayInput,
                 textures: { ...materialTextureInput },
               }
             : existing
@@ -541,7 +783,7 @@ export default function App() {
   const canCreateMaterial =
     materialNameInput.trim().length > 0 &&
     assets.length > 0 &&
-    MATERIAL_TEXTURE_FIELDS.every(({ key }) => Boolean(materialTextureInput[key]));
+    MATERIAL_TEXTURE_FIELDS.every(({ key, required }) => !required || Boolean(materialTextureInput[key]));
 
   if (mode === "home") {
     return (
@@ -604,7 +846,7 @@ export default function App() {
         style={{ display: "none" }}
       />
 
-      <Tabletop
+      <TabletopViewport
         snapToGrid={snapToGrid}
         contextAction={contextAction}
         placingAsset={mode === "create" ? placingAsset : null}
@@ -751,6 +993,22 @@ export default function App() {
                 placeholder="Priority (higher overlays lower)"
                 style={inputStyle}
               />
+              <select
+                value={materialRotationModeInput}
+                onChange={(event) => setMaterialRotationModeInput(event.target.value as TileRotationMode)}
+                style={{ ...inputStyle, minHeight: 28 }}
+              >
+                <option value="random90">Rotation: Random 90°</option>
+                <option value="none">Rotation: No rotation</option>
+              </select>
+              <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#c8d1df" }}>
+                <input
+                  type="checkbox"
+                  checked={noOverlayInput}
+                  onChange={(event) => setNoOverlayInput(event.target.checked)}
+                />
+                No overlay
+              </label>
               <div style={{ display: "grid", gap: 6 }}>
                 {MATERIAL_TEXTURE_FIELDS.map((field) => (
                   <label key={field.key} style={{ display: "grid", gap: 3 }}>
@@ -758,9 +1016,22 @@ export default function App() {
                     <select
                       value={materialTextureInput[field.key]}
                       onChange={(event) => updateMaterialTextureInput(field.key, event.target.value)}
+                      disabled={
+                        noOverlayInput &&
+                        (field.key === "overlayAssetId" ||
+                          field.key === "cornerOverlayAssetId" ||
+                          field.key === "overlayHorizontalAssetId" ||
+                          field.key === "overlayVerticalAssetId" ||
+                          field.key === "cornerOverlayHorizontalAssetId" ||
+                          field.key === "cornerOverlayVerticalAssetId" ||
+                          field.key === "cornerOverlayNeAssetId" ||
+                          field.key === "cornerOverlayNwAssetId" ||
+                          field.key === "cornerOverlaySeAssetId" ||
+                          field.key === "cornerOverlaySwAssetId")
+                      }
                       style={{ ...inputStyle, minHeight: 28 }}
                     >
-                      <option value="">Select asset</option>
+                      <option value="">{field.emptyLabel ?? "Select asset"}</option>
                       {assets.map((asset) => (
                         <option key={asset.id} value={asset.id}>
                           {asset.name}
@@ -818,10 +1089,16 @@ export default function App() {
                     >
                       <div style={{ fontSize: 12, color: "#d9dee7" }}>{material.name}</div>
                       <div style={{ fontSize: 10, color: "#9ca7bb" }}>
-                        Priority: {material.priority} | Base:{" "}
+                        Priority: {material.priority} | Rotation:{" "}
+                        {material.rotationMode === "none" ? "None" : "Random 90°"} | Base:{" "}
                         {assetNameById.get(material.textures.baseAssetId) ?? "Missing"} | Overlay:{" "}
-                        {assetNameById.get(material.textures.overlayAssetId) ?? "Missing"} | Corner:{" "}
-                        {assetNameById.get(material.textures.cornerOverlayAssetId) ?? "Missing"}
+                        {material.textures.overlayAssetId
+                          ? (assetNameById.get(material.textures.overlayAssetId) ?? "Missing")
+                          : "None"}{" "}
+                        | Corner:{" "}
+                        {material.textures.cornerOverlayAssetId
+                          ? (assetNameById.get(material.textures.cornerOverlayAssetId) ?? "Missing")
+                          : "None"}
                       </div>
                       <div style={{ display: "flex", gap: 6 }}>
                         <button
