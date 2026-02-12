@@ -1,14 +1,5 @@
-import { createPortal } from "react-dom";
-import { useEffect, useRef, useState } from "react";
-import Tabletop from "../../components/Tabletop";
-import { createTabletopApp } from "../../pixi";
-import type {
-  AssetLibraryItem,
-  PlacingAsset,
-  PlayerCharacter,
-  TileMaterial,
-  TokenContextAction,
-} from "../../components/Tabletop";
+import { useEffect, useMemo, useRef } from "react";
+import { createTabletopApp, type TabletopAppHandle, type TabletopAppOptions } from "../../pixi";
 
 export type {
   AssetLibraryItem,
@@ -18,27 +9,10 @@ export type {
   TileMaterialTextures,
   TileRotationMode,
   TokenContextAction,
-} from "../../components/Tabletop";
+  TokenSummary,
+} from "../../pixi";
 
-type TokenSummary = {
-  id: string;
-  name: string;
-};
-
-type TabletopViewportProps = {
-  snapToGrid?: boolean;
-  contextAction?: TokenContextAction | null;
-  placingAsset?: PlacingAsset | null;
-  stampAsset?: PlacingAsset | null;
-  materials?: TileMaterial[];
-  stampingMaterialId?: string | null;
-  players?: PlayerCharacter[];
-  assetLibrary?: AssetLibraryItem[];
-  onPlacedAsset?: () => void;
-  onTokensChange?: (tokens: TokenSummary[]) => void;
-  onTokenContextMenu?: (tokenId: string, screenX: number, screenY: number) => void;
-  onRequestCloseContextMenu?: () => void;
-};
+export type TabletopViewportProps = TabletopAppOptions;
 
 export default function TabletopViewport({
   snapToGrid,
@@ -55,40 +29,67 @@ export default function TabletopViewport({
   onRequestCloseContextMenu,
 }: TabletopViewportProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
-  const [mountEl, setMountEl] = useState<HTMLDivElement | null>(null);
+  const tabletopHandleRef = useRef<TabletopAppHandle | null>(null);
+
+  const options = useMemo<TabletopAppOptions>(
+    () => ({
+      snapToGrid,
+      contextAction,
+      placingAsset,
+      stampAsset,
+      materials,
+      stampingMaterialId,
+      players,
+      assetLibrary,
+      onPlacedAsset,
+      onTokensChange,
+      onTokenContextMenu,
+      onRequestCloseContextMenu,
+    }),
+    [
+      snapToGrid,
+      contextAction,
+      placingAsset,
+      stampAsset,
+      materials,
+      stampingMaterialId,
+      players,
+      assetLibrary,
+      onPlacedAsset,
+      onTokensChange,
+      onTokenContextMenu,
+      onRequestCloseContextMenu,
+    ]
+  );
 
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
-    const tabletopApp = createTabletopApp(host);
-    setMountEl(tabletopApp.mountEl);
+    host.innerHTML = "";
+    const tabletopHandle = createTabletopApp(host, options);
+    tabletopHandleRef.current = tabletopHandle;
     return () => {
-      setMountEl(null);
-      tabletopApp.destroy();
+      tabletopHandleRef.current?.destroy();
+      tabletopHandleRef.current = null;
+      host.innerHTML = "";
     };
   }, []);
 
+  useEffect(() => {
+    tabletopHandleRef.current?.update(options);
+  }, [options]);
+
   return (
-    <div ref={hostRef} style={{ position: "fixed", inset: 0 }}>
-      {mountEl
-        ? createPortal(
-            <Tabletop
-              snapToGrid={snapToGrid}
-              contextAction={contextAction}
-              placingAsset={placingAsset}
-              stampAsset={stampAsset}
-              materials={materials}
-              stampingMaterialId={stampingMaterialId}
-              players={players}
-              assetLibrary={assetLibrary}
-              onPlacedAsset={onPlacedAsset}
-              onTokensChange={onTokensChange}
-              onTokenContextMenu={onTokenContextMenu}
-              onRequestCloseContextMenu={onRequestCloseContextMenu}
-            />,
-            mountEl
-          )
-        : null}
-    </div>
+    <div
+      ref={hostRef}
+      style={{
+        position: "fixed",
+        inset: 0,
+        width: "100vw",
+        height: "100vh",
+        overflow: "hidden",
+        background: "#0b0c10",
+      }}
+    />
   );
 }
