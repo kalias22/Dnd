@@ -2,6 +2,8 @@ import { createElement, useEffect, useRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Application, Container, Graphics, Rectangle, Sprite, Text, Texture } from "pixi.js";
 import { GRID_SIZE } from "./constants";
+import { circleCells, polygonCells, rectCells, type GridCell, type WorldPoint } from "../systems/brush/brushFill";
+import type { BrushAction, BrushMode, BrushTarget } from "../systems/brush/brushTypes";
 
 const ORIGIN_MARKER_SIZE = 22;
 const ORIGIN_MARKER_THICKNESS = 3;
@@ -113,6 +115,10 @@ export type TabletopAppOptions = {
   stampAsset?: PlacingAsset | null;
   materials?: TileMaterial[];
   stampingMaterialId?: string | null;
+  brushMode?: BrushMode;
+  brushAction?: BrushAction;
+  brushTarget?: BrushTarget;
+  gridOverlayEnabled?: boolean;
   players?: PlayerCharacter[];
   assetLibrary?: AssetLibraryItem[];
   onPlacedAsset?: () => void;
@@ -128,6 +134,10 @@ function PixiTabletopRuntime({
   stampAsset = null,
   materials = [],
   stampingMaterialId = null,
+  brushMode = "manual",
+  brushAction = "place",
+  brushTarget = "base",
+  gridOverlayEnabled = true,
   players = [],
   assetLibrary = [],
   onPlacedAsset,
@@ -141,6 +151,10 @@ function PixiTabletopRuntime({
   const stampAssetRef = useRef<PlacingAsset | null>(stampAsset);
   const materialsRef = useRef<TileMaterial[]>(materials);
   const stampingMaterialIdRef = useRef<string | null>(stampingMaterialId);
+  const brushModeRef = useRef<BrushMode>(brushMode);
+  const brushActionRef = useRef<BrushAction>(brushAction);
+  const brushTargetRef = useRef<BrushTarget>(brushTarget);
+  const gridOverlayEnabledRef = useRef(gridOverlayEnabled);
   const playersRef = useRef<PlayerCharacter[]>(players);
   const assetLibraryRef = useRef<AssetLibraryItem[]>(assetLibrary);
   const onPlacedAssetRef = useRef(onPlacedAsset);
@@ -155,6 +169,7 @@ function PixiTabletopRuntime({
     null
   );
   const refreshMaterialTilesRef = useRef<(() => void) | null>(null);
+  const applyGridOverlayVisibilityRef = useRef<((visible: boolean) => void) | null>(null);
 
   useEffect(() => {
     snapToGridRef.current = snapToGrid;
@@ -176,6 +191,23 @@ function PixiTabletopRuntime({
   useEffect(() => {
     stampingMaterialIdRef.current = stampingMaterialId;
   }, [stampingMaterialId]);
+
+  useEffect(() => {
+    brushModeRef.current = brushMode;
+  }, [brushMode]);
+
+  useEffect(() => {
+    brushActionRef.current = brushAction;
+  }, [brushAction]);
+
+  useEffect(() => {
+    brushTargetRef.current = brushTarget;
+  }, [brushTarget]);
+
+  useEffect(() => {
+    gridOverlayEnabledRef.current = gridOverlayEnabled;
+    applyGridOverlayVisibilityRef.current?.(gridOverlayEnabled);
+  }, [gridOverlayEnabled]);
 
   useEffect(() => {
     playersRef.current = players;
@@ -211,7 +243,8 @@ function PixiTabletopRuntime({
     let disposed = false;
     let app: Application | null = null;
     let world: Container | null = null;
-    let grid: Graphics | null = null;
+    let gridLayer: Graphics | null = null;
+    let previewLayer: Graphics | null = null;
     let tilesLayer: Container | null = null;
     let overlaysLayer: Container | null = null;
     let materialOverlayLayerById = new Map<string, Container>();
@@ -378,6 +411,25 @@ function PixiTabletopRuntime({
       if (movementPreviewOverlay) movementPreviewOverlay.clear();
     };
 
+    const clearBrushPreview = () => {
+      if (previewLayer) previewLayer.clear();
+    };
+
+    const drawBrushPreviewCells = (cells: GridCell[]) => {
+      if (!previewLayer) return;
+      previewLayer.clear();
+      for (const cell of cells) {
+        previewLayer
+          .rect(
+            toCellCenterCoordinate(cell.x) - GRID_SIZE / 2,
+            toCellCenterCoordinate(cell.y) - GRID_SIZE / 2,
+            GRID_SIZE,
+            GRID_SIZE
+          )
+          .fill({ color: 0x8ec5ff, alpha: 0.28 });
+      }
+    };
+
     const drawMovementPreview = (
       token: TokenRecord,
       startX: number,
@@ -402,7 +454,7 @@ function PixiTabletopRuntime({
     };
 
     const drawGrid = () => {
-      if (!app || !grid || !world) return;
+      if (!app || !gridLayer || !world) return;
 
       const halfWidth = Math.max(app.screen.width * 2, 2000);
       const halfHeight = Math.max(app.screen.height * 2, 2000);
@@ -411,20 +463,20 @@ function PixiTabletopRuntime({
       const startY = Math.floor(-halfHeight / GRID_SIZE) * GRID_SIZE;
       const endY = Math.ceil(halfHeight / GRID_SIZE) * GRID_SIZE;
 
-      grid.clear();
-      grid.setStrokeStyle({ width: 1, color: 0x505050, alpha: 0.9 });
+      gridLayer.clear();
+      gridLayer.setStrokeStyle({ width: 1, color: 0xd8e1ef, alpha: 0.25 });
 
       for (let x = startX; x <= endX; x += GRID_SIZE) {
-        grid.moveTo(x, startY);
-        grid.lineTo(x, endY);
+        gridLayer.moveTo(x, startY);
+        gridLayer.lineTo(x, endY);
       }
 
       for (let y = startY; y <= endY; y += GRID_SIZE) {
-        grid.moveTo(startX, y);
-        grid.lineTo(endX, y);
+        gridLayer.moveTo(startX, y);
+        gridLayer.lineTo(endX, y);
       }
 
-      grid.stroke();
+      gridLayer.stroke();
     };
 
     const drawOriginMarker = () => {
@@ -445,6 +497,10 @@ function PixiTabletopRuntime({
     const toCellCenterCoordinate = (cellCoordinate: number) => cellCoordinate * GRID_SIZE + GRID_SIZE / 2;
     const snapToCellCenter = (value: number) => toCellCenterCoordinate(toCellCoordinate(value));
     const toMaterialTileCellKey = (gx: number, gy: number) => `${gx},${gy}`;
+    const parseMaterialTileCellKey = (cellKey: string) => {
+      const [xRaw, yRaw] = cellKey.split(",");
+      return { gx: Number(xRaw), gy: Number(yRaw) };
+    };
     const getOrCreateTileCell = (gx: number, gy: number) => {
       const key = toMaterialTileCellKey(gx, gy);
       let existing = tileCellByKey.get(key);
@@ -885,19 +941,88 @@ function PixiTabletopRuntime({
       return created;
     };
 
-    const placeMaterialTileAtGrid = (gx: number, gy: number, materialId: string) => {
+    const addRefreshCells = (refreshKeys: Set<string>, gx: number, gy: number) => {
+      refreshKeys.add(toMaterialTileCellKey(gx, gy));
+      refreshKeys.add(toMaterialTileCellKey(gx, gy - 1));
+      refreshKeys.add(toMaterialTileCellKey(gx + 1, gy));
+      refreshKeys.add(toMaterialTileCellKey(gx, gy + 1));
+      refreshKeys.add(toMaterialTileCellKey(gx - 1, gy));
+    };
+
+    const removeOverlaysAtGrid = (gx: number, gy: number) => {
+      const cellKey = toMaterialTileCellKey(gx, gy);
+      const cell = tileCellByKey.get(cellKey);
+      if (!cell || cell.overlays.length === 0) return false;
+      for (const overlaySprite of cell.overlays) {
+        if (!overlaySprite.destroyed) overlaySprite.destroy();
+      }
+      cell.overlays = [];
+      return true;
+    };
+
+    const removeMaterialTileAtGrid = (gx: number, gy: number) => {
+      const cellKey = toMaterialTileCellKey(gx, gy);
+      let changed = false;
+      const existing = materialTileByCellKey.get(cellKey);
+      if (existing) {
+        if (!existing.sprite.destroyed) existing.sprite.destroy();
+        materialTileByCellKey.delete(cellKey);
+        changed = true;
+      }
+
+      const cell = tileCellByKey.get(cellKey);
+      if (cell?.base) {
+        if (!cell.base.destroyed) cell.base.destroy();
+        cell.base = undefined;
+        changed = true;
+      }
+
+      return changed;
+    };
+
+    const applyMaterialCells = (cells: GridCell[], materialId: string) => {
       const material = getMaterialById(materialId);
       if (!material) return false;
-
-      const tile = upsertMaterialTileAt(gx, gy, material.id);
-      if (!tile) return false;
-      updateMaterialTileVisualAt(gx, gy);
-      updateMaterialTileVisualAt(gx, gy - 1);
-      updateMaterialTileVisualAt(gx + 1, gy);
-      updateMaterialTileVisualAt(gx, gy + 1);
-      updateMaterialTileVisualAt(gx - 1, gy);
+      const refreshKeys = new Set<string>();
+      let changed = false;
+      for (const cell of cells) {
+        const tile = upsertMaterialTileAt(cell.x, cell.y, material.id);
+        if (!tile) continue;
+        changed = true;
+        addRefreshCells(refreshKeys, cell.x, cell.y);
+      }
+      if (!changed) return false;
+      for (const key of refreshKeys) {
+        const { gx, gy } = parseMaterialTileCellKey(key);
+        updateMaterialTileVisualAt(gx, gy);
+      }
       rebuildMaterialOverlays();
       return true;
+    };
+
+    const eraseBaseCells = (cells: GridCell[]) => {
+      const refreshKeys = new Set<string>();
+      let changed = false;
+      for (const cell of cells) {
+        if (!removeMaterialTileAtGrid(cell.x, cell.y)) continue;
+        changed = true;
+        addRefreshCells(refreshKeys, cell.x, cell.y);
+      }
+      if (!changed) return false;
+      for (const key of refreshKeys) {
+        const { gx, gy } = parseMaterialTileCellKey(key);
+        updateMaterialTileVisualAt(gx, gy);
+      }
+      rebuildMaterialOverlays();
+      return true;
+    };
+
+    const eraseOverlayCells = (cells: GridCell[]) => {
+      let changed = false;
+      for (const cell of cells) {
+        if (removeOverlaysAtGrid(cell.x, cell.y)) changed = true;
+      }
+      return changed;
     };
 
     const refreshAllMaterialTileVisuals = () => {
@@ -975,20 +1100,51 @@ function PixiTabletopRuntime({
       image.src = asset.url;
     };
 
-    const getContinuousPlacementKeyAtWorld = (rawWorldX: number, rawWorldY: number) => {
-      const activeStampMaterialId = stampingMaterialIdRef.current;
-      if (activeStampMaterialId) {
-        const gx = toCellCoordinate(rawWorldX);
-        const gy = toCellCoordinate(rawWorldY);
-        return `material:${activeStampMaterialId}:${gx},${gy}`;
+    const getBrushCellsFromDrag = (
+      startCell: GridCell,
+      endCell: GridCell,
+      freehandPointsWorld: WorldPoint[]
+    ): GridCell[] => {
+      const mode = brushModeRef.current;
+      if (mode === "circle") {
+        return circleCells(startCell, endCell);
+      }
+      if (mode === "freehand") {
+        const polygonFilled = polygonCells(freehandPointsWorld, GRID_SIZE);
+        if (polygonFilled.length > 0) return polygonFilled;
+        return [{ x: endCell.x, y: endCell.y }];
+      }
+      return rectCells(startCell, endCell);
+    };
+
+    const applyCells = (cells: GridCell[]) => {
+      if (cells.length === 0) return false;
+      if (brushActionRef.current === "erase") {
+        if (brushTargetRef.current === "overlay") {
+          return eraseOverlayCells(cells);
+        }
+        return eraseBaseCells(cells);
       }
 
-      const singlePlaceAsset = placingAssetRef.current;
+      const activeStampMaterialId = stampingMaterialIdRef.current;
+      if (activeStampMaterialId) {
+        return applyMaterialCells(cells, activeStampMaterialId);
+      }
+
       const stampPlaceAsset = stampAssetRef.current;
-      if (singlePlaceAsset || !stampPlaceAsset) return null;
-      const gx = toCellCoordinate(rawWorldX);
-      const gy = toCellCoordinate(rawWorldY);
-      return `stamp:${stampPlaceAsset.id}:${gx},${gy}`;
+      if (stampPlaceAsset) {
+        for (const cell of cells) {
+          placeAssetSprite(
+            stampPlaceAsset,
+            toCellCenterCoordinate(cell.x),
+            toCellCenterCoordinate(cell.y),
+            true
+          );
+        }
+        return true;
+      }
+
+      return false;
     };
 
     const placeAssetAtWorld = (rawWorldX: number, rawWorldY: number) => {
@@ -996,7 +1152,7 @@ function PixiTabletopRuntime({
       if (activeStampMaterialId) {
         const gx = toCellCoordinate(rawWorldX);
         const gy = toCellCoordinate(rawWorldY);
-        return placeMaterialTileAtGrid(gx, gy, activeStampMaterialId) ? "material" : null;
+        return applyMaterialCells([{ x: gx, y: gy }], activeStampMaterialId) ? "material" : null;
       }
 
       const singlePlaceAsset = placingAssetRef.current;
@@ -1253,9 +1409,13 @@ function PixiTabletopRuntime({
       let tokenDragStartY = 0;
       let tokenPreviewX = 0;
       let tokenPreviewY = 0;
-      let paintingPlacement = false;
-      let paintPointerId: number | null = null;
-      let lastPaintPlacementKey: string | null = null;
+      let brushingArea = false;
+      let brushPointerId: number | null = null;
+      let brushStartCell: GridCell = { x: 0, y: 0 };
+      let brushCurrentCell: GridCell = { x: 0, y: 0 };
+      let brushPointsWorld: WorldPoint[] = [];
+      let lastBrushPoint: WorldPoint | null = null;
+      let lastManualCell: GridCell | null = null;
 
       const finishTokenDrag = (selectOnClick: boolean) => {
         if (!draggingToken) return;
@@ -1299,22 +1459,37 @@ function PixiTabletopRuntime({
 
         if (button !== 0) return;
 
-        const hasActivePlacement = Boolean(
-          stampingMaterialIdRef.current || placingAssetRef.current || stampAssetRef.current
-        );
-        if (hasActivePlacement) {
+        const singlePlaceAsset = placingAssetRef.current;
+        if (singlePlaceAsset) {
           event.nativeEvent?.preventDefault?.();
           const local = world.toLocal(event.global);
           const placedMode = placeAssetAtWorld(local.x, local.y);
           if (!placedMode) return;
-          if (placedMode === "single") {
-            onPlacedAssetRef.current?.();
-            return;
-          }
+          onPlacedAssetRef.current?.();
+          return;
+        }
 
-          paintingPlacement = true;
-          paintPointerId = event.pointerId;
-          lastPaintPlacementKey = getContinuousPlacementKeyAtWorld(local.x, local.y);
+        const hasPlacementSource = Boolean(stampingMaterialIdRef.current || stampAssetRef.current);
+        const hasBrushPlacement = hasPlacementSource || brushActionRef.current === "erase";
+        if (hasBrushPlacement) {
+          event.nativeEvent?.preventDefault?.();
+          const local = world.toLocal(event.global);
+          const gx = toCellCoordinate(local.x);
+          const gy = toCellCoordinate(local.y);
+          brushingArea = true;
+          brushPointerId = event.pointerId;
+          brushStartCell = { x: gx, y: gy };
+          brushCurrentCell = { x: gx, y: gy };
+          brushPointsWorld = [{ x: local.x, y: local.y }];
+          lastBrushPoint = brushPointsWorld[0];
+          lastManualCell = null;
+          if (brushModeRef.current === "manual") {
+            applyCells([{ x: gx, y: gy }]);
+            lastManualCell = { x: gx, y: gy };
+            clearBrushPreview();
+          } else {
+            drawBrushPreviewCells(getBrushCellsFromDrag(brushStartCell, brushCurrentCell, brushPointsWorld));
+          }
           return;
         }
 
@@ -1340,14 +1515,30 @@ function PixiTabletopRuntime({
           lastPanY = event.global.y;
         }
 
-        if (paintingPlacement && event.pointerId === paintPointerId) {
+        if (brushingArea && event.pointerId === brushPointerId) {
           const local = world.toLocal(event.global);
-          const nextPlacementKey = getContinuousPlacementKeyAtWorld(local.x, local.y);
-          if (nextPlacementKey && nextPlacementKey !== lastPaintPlacementKey) {
-            const placedMode = placeAssetAtWorld(local.x, local.y);
-            if (placedMode && placedMode !== "single") {
-              lastPaintPlacementKey = nextPlacementKey;
+          brushCurrentCell = { x: toCellCoordinate(local.x), y: toCellCoordinate(local.y) };
+          if (brushModeRef.current === "manual") {
+            if (!lastManualCell || lastManualCell.x !== brushCurrentCell.x || lastManualCell.y !== brushCurrentCell.y) {
+              applyCells([brushCurrentCell]);
+              lastManualCell = { x: brushCurrentCell.x, y: brushCurrentCell.y };
             }
+          } else if (brushModeRef.current === "freehand") {
+            const nextPoint = { x: local.x, y: local.y };
+            if (!lastBrushPoint) {
+              brushPointsWorld.push(nextPoint);
+              lastBrushPoint = nextPoint;
+            } else {
+              const deltaX = nextPoint.x - lastBrushPoint.x;
+              const deltaY = nextPoint.y - lastBrushPoint.y;
+              if (deltaX * deltaX + deltaY * deltaY >= 16) {
+                brushPointsWorld.push(nextPoint);
+                lastBrushPoint = nextPoint;
+              }
+            }
+            drawBrushPreviewCells(getBrushCellsFromDrag(brushStartCell, brushCurrentCell, brushPointsWorld));
+          } else {
+            drawBrushPreviewCells(getBrushCellsFromDrag(brushStartCell, brushCurrentCell, brushPointsWorld));
           }
         }
 
@@ -1384,10 +1575,32 @@ function PixiTabletopRuntime({
           canvas.style.cursor = "grab";
         }
 
-        if (paintingPlacement && event.pointerId === paintPointerId) {
-          paintingPlacement = false;
-          paintPointerId = null;
-          lastPaintPlacementKey = null;
+        if (brushingArea && event.pointerId === brushPointerId) {
+          if (world) {
+            const local = world.toLocal(event.global);
+            brushCurrentCell = { x: toCellCoordinate(local.x), y: toCellCoordinate(local.y) };
+            if (brushModeRef.current === "freehand") {
+              const endPoint = { x: local.x, y: local.y };
+              if (
+                !lastBrushPoint ||
+                (endPoint.x - lastBrushPoint.x) * (endPoint.x - lastBrushPoint.x) +
+                  (endPoint.y - lastBrushPoint.y) * (endPoint.y - lastBrushPoint.y) >=
+                  1
+              ) {
+                brushPointsWorld.push(endPoint);
+              }
+            }
+            if (brushModeRef.current !== "manual") {
+              const cells = getBrushCellsFromDrag(brushStartCell, brushCurrentCell, brushPointsWorld);
+              applyCells(cells);
+            }
+          }
+          clearBrushPreview();
+          brushingArea = false;
+          brushPointerId = null;
+          brushPointsWorld = [];
+          lastBrushPoint = null;
+          lastManualCell = null;
         }
 
         if (selecting && event.pointerId === selectionPointerId) {
@@ -1649,14 +1862,22 @@ function PixiTabletopRuntime({
       world = new Container();
       nextApp.stage.addChild(world);
 
-      grid = new Graphics();
-      world.addChild(grid);
-
       tilesLayer = new Container();
       world.addChild(tilesLayer);
 
       overlaysLayer = new Container();
       world.addChild(overlaysLayer);
+
+      gridLayer = new Graphics();
+      world.addChild(gridLayer);
+      applyGridOverlayVisibilityRef.current = (visible: boolean) => {
+        if (!gridLayer) return;
+        gridLayer.visible = visible;
+      };
+      applyGridOverlayVisibilityRef.current(gridOverlayEnabledRef.current);
+
+      previewLayer = new Graphics();
+      world.addChild(previewLayer);
 
       originMarker = new Graphics();
       world.addChild(originMarker);
@@ -1705,6 +1926,7 @@ function PixiTabletopRuntime({
       runContextActionRef.current = null;
       syncPlayersRef.current = null;
       refreshMaterialTilesRef.current = null;
+      applyGridOverlayVisibilityRef.current = null;
       materialTileByCellKey.clear();
       tileCellByKey.clear();
       textureByUrl.clear();
