@@ -1,33 +1,21 @@
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-import {
-  app,
-  BrowserWindow,
-  dialog,
-  ipcMain,
-  Menu,
-  shell,
-  type MenuItemConstructorOptions,
-} from "electron";
-import {
-  createCampaign,
+const path = require("node:path");
+const { app, BrowserWindow, Menu, dialog, ipcMain, shell } = require("electron");
+const {
   ensureBaseFolders,
-  getCampaignsPath,
-  listCampaigns,
-  loadToolSettings,
   readJSON,
-  saveToolSettings,
   writeJSON,
-} from "./fileApi";
+  listCampaigns,
+  createCampaign,
+  loadToolSettings,
+  saveToolSettings,
+  getCampaignsPath,
+} = require("./fileApi.cjs");
 
 const DEV_URL = "http://127.0.0.1:5173";
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+let mainWindow = null;
+let cachedToolSettings = null;
 
-let mainWindow: BrowserWindow | null = null;
-let cachedToolSettings: unknown = null;
-
-const createMainWindow = () => {
+function createMainWindow() {
   const window = new BrowserWindow({
     width: 1280,
     height: 720,
@@ -46,9 +34,9 @@ const createMainWindow = () => {
 
   void window.loadURL(DEV_URL);
   return window;
-};
+}
 
-const promptForCampaignName = async (window: BrowserWindow | null) => {
+async function promptForCampaignName(window) {
   if (!window || window.isDestroyed()) return null;
   try {
     const result = await window.webContents.executeJavaScript(
@@ -61,19 +49,19 @@ const promptForCampaignName = async (window: BrowserWindow | null) => {
   } catch {
     return null;
   }
-};
+}
 
-const toggleDevTools = (window: BrowserWindow | null) => {
+function toggleDevTools(window) {
   if (!window) return;
   if (window.webContents.isDevToolsOpened()) {
     window.webContents.closeDevTools();
     return;
   }
   window.webContents.openDevTools();
-};
+}
 
-const buildMenu = () => {
-  const template: MenuItemConstructorOptions[] = [
+function buildMenu() {
+  return Menu.buildFromTemplate([
     {
       label: "File",
       submenu: [
@@ -84,7 +72,7 @@ const buildMenu = () => {
             if (!name) return;
             try {
               await createCampaign(name);
-            } catch (error: unknown) {
+            } catch (error) {
               dialog.showErrorBox("New Campaign Failed", String(error));
             }
           },
@@ -100,7 +88,7 @@ const buildMenu = () => {
           label: "Save Tool Settings (manual trigger)",
           click: async () => {
             const nextSettings = cachedToolSettings ?? (await loadToolSettings());
-            cachedToolSettings = await saveToolSettings(nextSettings as any);
+            cachedToolSettings = await saveToolSettings(nextSettings);
           },
         },
         { type: "separator" },
@@ -124,39 +112,37 @@ const buildMenu = () => {
         },
       ],
     },
-  ];
-  return Menu.buildFromTemplate(template);
-};
+  ]);
+}
 
-const registerIpcHandlers = () => {
-  const register = (channel: string, handler: (...args: any[]) => Promise<unknown>) => {
+function registerIpcHandlers() {
+  const register = (channel, handler) => {
     ipcMain.removeHandler(channel);
     ipcMain.handle(channel, (_event, ...args) => handler(...args));
   };
 
   register("files:ensureBaseFolders", async () => ensureBaseFolders());
-  register("files:readJSON", async (targetPath: string) => readJSON(targetPath));
-  register("files:writeJSON", async (targetPath: string, data: unknown) => writeJSON(targetPath, data));
+  register("files:readJSON", async (targetPath) => readJSON(targetPath));
+  register("files:writeJSON", async (targetPath, data) => writeJSON(targetPath, data));
   register("files:listCampaigns", async () => listCampaigns());
-  register("files:createCampaign", async (name: string) => createCampaign(name));
+  register("files:createCampaign", async (name) => createCampaign(name));
   register("files:loadToolSettings", async () => {
     const settings = await loadToolSettings();
     cachedToolSettings = settings;
     return settings;
   });
-  register("files:saveToolSettings", async (settings: unknown) => {
-    const saved = await saveToolSettings(settings as any);
+  register("files:saveToolSettings", async (settings) => {
+    const saved = await saveToolSettings(settings);
     cachedToolSettings = saved;
     return saved;
   });
-};
+}
 
 app.whenReady().then(async () => {
   await ensureBaseFolders();
   cachedToolSettings = await loadToolSettings();
   registerIpcHandlers();
   Menu.setApplicationMenu(buildMenu());
-
   mainWindow = createMainWindow();
 
   app.on("activate", () => {
