@@ -21,5 +21,6 @@ export type ToolSettings = {
 export type CampaignMeta = {
   id: string;
   name: string;
+  description?: string;
   scenes: { id: string; name: string; file: string }[];
 };

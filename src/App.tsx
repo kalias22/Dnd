@@ -8,13 +8,20 @@ import TabletopViewport, {
   type TileMaterialTextures,
   type TokenContextAction,
 } from "./ui/components/TabletopViewport";
+import BrushTab from "./ui/components/BrushTab";
+import type { BrushAction, BrushMode, BrushTarget } from "./systems/brush/brushTypes";
+import HomeScreen from "./ui/screens/HomeScreen";
+import DMScreen from "./ui/screens/DMScreen";
+import PlayerScreen from "./ui/screens/PlayerScreen";
+import CampaignShell from "./ui/screens/CampaignShell";
+import { createInitialAppNavState } from "./ui/state/appNav";
 
 type AssetImage = AssetLibraryItem & {
   name: string;
   source: "general" | "tileset";
 };
 
-type AppMode = "home" | "create" | "play";
+type TabletopMode = "create" | "play";
 
 const PLAYER_COLORS = ["#d35400", "#1abc9c", "#3498db", "#9b59b6", "#e74c3c", "#f1c40f"];
 
@@ -257,11 +264,13 @@ const sortOrderByInitiativeDesc = (order: string[], initiatives: Record<string, 
 };
 
 export default function App() {
-  const [mode, setMode] = useState<AppMode>("home");
+  const [mode, setMode] = useState<TabletopMode>("create");
+  const [nav, setNav] = useState(createInitialAppNavState);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [snapToGrid, setSnapToGrid] = useState(true);
   const [assetsOpen, setAssetsOpen] = useState(false);
   const [playersOpen, setPlayersOpen] = useState(true);
+  const [brushOpen, setBrushOpen] = useState(true);
   const [playSetupOpen, setPlaySetupOpen] = useState(false);
   const [initiativeOpen, setInitiativeOpen] = useState(true);
   const [assets, setAssets] = useState<AssetImage[]>([]);
@@ -273,6 +282,10 @@ export default function App() {
   const [stampAsset, setStampAsset] = useState<PlacingAsset | null>(null);
   const [materials, setMaterials] = useState<TileMaterial[]>([]);
   const [stampingMaterialId, setStampingMaterialId] = useState<string | null>(null);
+  const [brushMode, setBrushMode] = useState<BrushMode>("manual");
+  const [brushAction, setBrushAction] = useState<BrushAction>("place");
+  const [brushTarget, setBrushTarget] = useState<BrushTarget>("base");
+  const [gridOverlayEnabled, setGridOverlayEnabled] = useState(true);
   const [editingMaterialId, setEditingMaterialId] = useState<string | null>(null);
   const [materialNameInput, setMaterialNameInput] = useState("");
   const [materialPriorityInput, setMaterialPriorityInput] = useState("0");
@@ -785,49 +798,63 @@ export default function App() {
     assets.length > 0 &&
     MATERIAL_TEXTURE_FIELDS.every(({ key, required }) => !required || Boolean(materialTextureInput[key]));
 
-  if (mode === "home") {
+  if (nav.route === "home") {
     return (
-      <div
-        style={{
-          position: "fixed",
-          inset: 0,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          background: "radial-gradient(circle at top, #1d2638 0%, #0b0c10 55%, #08090c 100%)",
-          color: "#f2f2f2",
-          fontFamily: "sans-serif",
-          padding: 16,
+      <HomeScreen
+        onSelectDM={() => {
+          setMode("create");
+          setNav((previous) => ({
+            ...previous,
+            route: "dm",
+            campaignMode: "edit",
+            role: "dm",
+            campaignName: null,
+            selectedCampaignId: null,
+          }));
         }}
-      >
-        <div
-          style={{
-            width: "min(560px, 100%)",
-            border: "1px solid #3d4558",
-            borderRadius: 14,
-            background: "rgba(14,16,22,0.92)",
-            boxShadow: "0 20px 48px rgba(0,0,0,0.35)",
-            padding: "28px 24px",
-            display: "grid",
-            gap: 16,
-            textAlign: "center",
-          }}
-        >
-          <h1 style={{ margin: 0, fontSize: 38, lineHeight: 1.1, letterSpacing: 0.4 }}>DnD Virtual Tabletop</h1>
-          <div style={{ display: "flex", justifyContent: "center", gap: 12, flexWrap: "wrap" }}>
-            <button type="button" onClick={() => setMode("create")} style={homeButtonStyle}>
-              Create Campaign
-            </button>
-            <button type="button" onClick={() => setMode("play")} style={homeButtonStyle}>
-              Play Campaign
-            </button>
-          </div>
-        </div>
-      </div>
+        onSelectPlayer={() => {
+          setMode("play");
+          setNav((previous) => ({
+            ...previous,
+            route: "player",
+            campaignMode: "play",
+            role: "player",
+            campaignName: null,
+            selectedCampaignId: null,
+          }));
+        }}
+      />
     );
   }
 
-  return (
+  if (nav.route === "dm") {
+    return (
+      <DMScreen
+        onBack={() => setNav((previous) => ({ ...previous, route: "home" }))}
+        onEnterCampaign={({ campaignId, campaignName, mode: campaignMode, role }) => {
+          setMode(campaignMode === "edit" ? "create" : "play");
+          setNav((previous) => ({
+            ...previous,
+            route: "campaign",
+            selectedCampaignId: campaignId ?? null,
+            campaignMode,
+            role,
+            campaignName,
+          }));
+        }}
+      />
+    );
+  }
+
+  if (nav.route === "player") {
+    return <PlayerScreen onBack={() => setNav((previous) => ({ ...previous, route: "home" }))} />;
+  }
+
+  if (nav.route !== "campaign") {
+    return null;
+  }
+
+  const campaignContent = (
     <div style={{ position: "fixed", inset: 0 }}>
       <input
         ref={assetInputRef}
@@ -853,6 +880,10 @@ export default function App() {
         stampAsset={mode === "create" ? stampAsset : null}
         materials={materials}
         stampingMaterialId={mode === "create" ? stampingMaterialId : null}
+        brushMode={mode === "create" ? brushMode : "manual"}
+        brushAction={mode === "create" ? brushAction : "place"}
+        brushTarget={mode === "create" ? brushTarget : "base"}
+        gridOverlayEnabled={gridOverlayEnabled}
         players={players}
         assetLibrary={assetLibrary}
         onPlacedAsset={mode === "create" ? () => setPlacingAsset(null) : undefined}
@@ -1224,6 +1255,35 @@ export default function App() {
             </button>
           </div>
 
+          <div
+            style={{
+              position: "fixed",
+              right: 12,
+              bottom: 12,
+              zIndex: 1105,
+              width: 332,
+              display: "flex",
+              alignItems: "flex-end",
+              gap: 6,
+              transform: brushOpen ? "translateX(0)" : "translateX(246px)",
+              transition: "transform 160ms ease",
+            }}
+          >
+            <button type="button" onClick={() => setBrushOpen((open) => !open)} style={panelToggleButtonStyle}>
+              {brushOpen ? "Hide" : "Brush"}
+            </button>
+            <BrushTab
+              brushMode={brushMode}
+              setBrushMode={setBrushMode}
+              brushAction={brushAction}
+              setBrushAction={setBrushAction}
+              brushTarget={brushTarget}
+              setBrushTarget={setBrushTarget}
+              gridOverlayEnabled={gridOverlayEnabled}
+              setGridOverlayEnabled={setGridOverlayEnabled}
+            />
+          </div>
+
           {activeCreateTool && (
             <div
               style={{
@@ -1460,19 +1520,6 @@ export default function App() {
         style={{
           position: "fixed",
           top: 12,
-          left: 12,
-          zIndex: 1120,
-        }}
-      >
-        <button type="button" onClick={() => setMode("home")} style={trackerButtonStyle}>
-          Home
-        </button>
-      </div>
-
-      <div
-        style={{
-          position: "fixed",
-          top: 12,
           right: 12,
           zIndex: 1130,
           display: "flex",
@@ -1539,6 +1586,17 @@ export default function App() {
       </div>
     </div>
   );
+
+  return (
+    <CampaignShell
+      role={nav.role}
+      campaignMode={nav.campaignMode}
+      campaignName={nav.campaignName ?? "Untitled Campaign"}
+      onExitCampaign={() => setNav((previous) => ({ ...previous, route: "home" }))}
+    >
+      {campaignContent}
+    </CampaignShell>
+  );
 }
 
 const menuButtonStyle: CSSProperties = {
@@ -1560,18 +1618,6 @@ const trackerButtonStyle: CSSProperties = {
   fontSize: 12,
   padding: "6px 8px",
   cursor: "pointer",
-};
-
-const homeButtonStyle: CSSProperties = {
-  border: "1px solid #49526a",
-  borderRadius: 10,
-  background: "rgba(24,28,37,0.95)",
-  color: "#f2f2f2",
-  fontSize: 16,
-  fontWeight: 600,
-  padding: "12px 16px",
-  cursor: "pointer",
-  minWidth: 170,
 };
 
 const panelToggleButtonStyle: CSSProperties = {

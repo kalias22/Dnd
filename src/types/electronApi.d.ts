@@ -5,7 +5,7 @@ type FileApi = {
   readJSON: (path: string) => Promise<unknown>;
   writeJSON: (path: string, data: unknown) => Promise<{ path: string }>;
   listCampaigns: () => Promise<CampaignMeta[]>;
-  createCampaign: (name: string) => Promise<CampaignMeta>;
+  createCampaign: (input: string | { name: string; description?: string }) => Promise<CampaignMeta>;
   loadToolSettings: () => Promise<ToolSettings>;
   saveToolSettings: (settings: ToolSettings) => Promise<ToolSettings>;
 };

@@ -4,7 +4,7 @@ import path from "node:path";
 import { app } from "electron";
 
 type SceneMeta = { id: string; name: string; file: string };
-type CampaignMeta = { id: string; name: string; scenes: SceneMeta[] };
+type CampaignMeta = { id: string; name: string; description?: string; scenes: SceneMeta[] };
 type ToolSettings = {
   brush: {
     mode: "manual" | "rect" | "circle" | "freehand";
@@ -171,6 +171,7 @@ export async function listCampaigns() {
       campaigns.push({
         id: parsed.id ?? entry.name,
         name: parsed.name ?? entry.name,
+        description: typeof parsed.description === "string" ? parsed.description : undefined,
         scenes: Array.isArray(parsed.scenes) ? (parsed.scenes as SceneMeta[]) : [],
       });
     } catch {
@@ -186,9 +187,21 @@ export async function listCampaigns() {
   return campaigns;
 }
 
-export async function createCampaign(name: string) {
+const normalizeCreateCampaignInput = (input: string | { name: string; description?: string }) => {
+  if (typeof input === "string") {
+    return { name: input, description: "" };
+  }
+  return {
+    name: input?.name ?? "",
+    description: input?.description ?? "",
+  };
+};
+
+export async function createCampaign(input: string | { name: string; description?: string }) {
   await ensureBaseFolders();
-  const campaignName = sanitizeCampaignName(name);
+  const normalizedInput = normalizeCreateCampaignInput(input);
+  const campaignName = sanitizeCampaignName(normalizedInput.name);
+  const campaignDescription = normalizedInput.description.trim();
   if (!campaignName) {
     throw new Error("Campaign name is required.");
   }
@@ -206,6 +219,7 @@ export async function createCampaign(name: string) {
   const campaignMeta: CampaignMeta = {
     id: randomUUID(),
     name: campaignName,
+    ...(campaignDescription ? { description: campaignDescription } : {}),
     scenes: [{ id: sceneId, name: "Scene 1", file: `scenes/${sceneFileName}` }],
   };
 

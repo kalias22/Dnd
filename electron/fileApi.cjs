@@ -148,6 +148,7 @@ const listCampaigns = async () => {
       campaigns.push({
         id: parsed.id ?? entry.name,
         name: parsed.name ?? entry.name,
+        description: typeof parsed.description === "string" ? parsed.description : undefined,
         scenes: Array.isArray(parsed.scenes) ? parsed.scenes : [],
       });
     } catch {
@@ -163,9 +164,23 @@ const listCampaigns = async () => {
   return campaigns;
 };
 
-const createCampaign = async (name) => {
+const normalizeCreateCampaignInput = (input) => {
+  if (typeof input === "string") {
+    return { name: input, description: "" };
+  }
+  if (input && typeof input === "object") {
+    const nextName = typeof input.name === "string" ? input.name : "";
+    const nextDescription = typeof input.description === "string" ? input.description : "";
+    return { name: nextName, description: nextDescription };
+  }
+  return { name: "", description: "" };
+};
+
+const createCampaign = async (input) => {
   await ensureBaseFolders();
-  const campaignName = sanitizeCampaignName(name);
+  const normalizedInput = normalizeCreateCampaignInput(input);
+  const campaignName = sanitizeCampaignName(normalizedInput.name);
+  const campaignDescription = normalizedInput.description.trim();
   if (!campaignName) {
     throw new Error("Campaign name is required.");
   }
@@ -183,6 +198,7 @@ const createCampaign = async (name) => {
   const campaignMeta = {
     id: randomUUID(),
     name: campaignName,
+    ...(campaignDescription ? { description: campaignDescription } : {}),
     scenes: [{ id: sceneId, name: "Scene 1", file: `scenes/${sceneFileName}` }],
   };
 

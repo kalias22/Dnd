@@ -138,7 +138,7 @@ const registerIpcHandlers = () => {
   register("files:readJSON", async (targetPath: string) => readJSON(targetPath));
   register("files:writeJSON", async (targetPath: string, data: unknown) => writeJSON(targetPath, data));
   register("files:listCampaigns", async () => listCampaigns());
-  register("files:createCampaign", async (name: string) => createCampaign(name));
+  register("files:createCampaign", async (input: string | { name: string; description?: string }) => createCampaign(input));
   register("files:loadToolSettings", async () => {
     const settings = await loadToolSettings();
     cachedToolSettings = settings;

@@ -1385,10 +1385,9 @@ function PixiTabletopRuntime({
     syncPlayersRef.current = syncPlayers;
 
     const setupInteractions = (canvas: HTMLCanvasElement, stage: Container, tokens: TokenRecord[]) => {
-      let panning = false;
-      let panPointerId: number | null = null;
-      let lastPanX = 0;
-      let lastPanY = 0;
+      let middlePanning = false;
+      let lastMiddlePanClientX = 0;
+      let lastMiddlePanClientY = 0;
 
       let selecting = false;
       let selectionPointerId: number | null = null;
@@ -1437,6 +1436,42 @@ function PixiTabletopRuntime({
         canvas.style.cursor = "grab";
       };
 
+      const stopMiddlePan = () => {
+        if (!middlePanning) return;
+        middlePanning = false;
+        canvas.style.cursor = "grab";
+      };
+
+      const onMiddleMouseDown = (event: MouseEvent) => {
+        if (!world) return;
+        if (event.button !== 1) return;
+        event.preventDefault();
+        onRequestCloseContextMenuRef.current?.();
+        middlePanning = true;
+        lastMiddlePanClientX = event.clientX;
+        lastMiddlePanClientY = event.clientY;
+        canvas.style.cursor = "grabbing";
+      };
+
+      const onWindowMouseMove = (event: MouseEvent) => {
+        if (!world || !middlePanning) return;
+        const deltaX = event.clientX - lastMiddlePanClientX;
+        const deltaY = event.clientY - lastMiddlePanClientY;
+        world.position.x += deltaX;
+        world.position.y += deltaY;
+        lastMiddlePanClientX = event.clientX;
+        lastMiddlePanClientY = event.clientY;
+      };
+
+      const onWindowMouseUp = (event: MouseEvent) => {
+        if (event.button !== 1) return;
+        stopMiddlePan();
+      };
+
+      const onWindowBlur = () => {
+        stopMiddlePan();
+      };
+
       const onStagePointerDown = (event: any) => {
         if (!world) return;
         onRequestCloseContextMenuRef.current?.();
@@ -1444,16 +1479,6 @@ function PixiTabletopRuntime({
 
         if (button === 2) {
           event.nativeEvent?.preventDefault?.();
-          return;
-        }
-
-        if (button === 1) {
-          event.nativeEvent?.preventDefault?.();
-          panning = true;
-          panPointerId = event.pointerId;
-          lastPanX = event.global.x;
-          lastPanY = event.global.y;
-          canvas.style.cursor = "grabbing";
           return;
         }
 
@@ -1505,15 +1530,6 @@ function PixiTabletopRuntime({
 
       const onStagePointerMove = (event: any) => {
         if (!world) return;
-
-        if (panning && event.pointerId === panPointerId) {
-          const deltaX = event.global.x - lastPanX;
-          const deltaY = event.global.y - lastPanY;
-          world.position.x += deltaX;
-          world.position.y += deltaY;
-          lastPanX = event.global.x;
-          lastPanY = event.global.y;
-        }
 
         if (brushingArea && event.pointerId === brushPointerId) {
           const local = world.toLocal(event.global);
@@ -1569,12 +1585,6 @@ function PixiTabletopRuntime({
       };
 
       const onStagePointerUp = (event: any) => {
-        if (panning && event.pointerId === panPointerId) {
-          panning = false;
-          panPointerId = null;
-          canvas.style.cursor = "grab";
-        }
-
         if (brushingArea && event.pointerId === brushPointerId) {
           if (world) {
             const local = world.toLocal(event.global);
@@ -1726,15 +1736,24 @@ function PixiTabletopRuntime({
         });
       }
 
+      canvas.addEventListener("mousedown", onMiddleMouseDown);
+      window.addEventListener("mousemove", onWindowMouseMove);
+      window.addEventListener("mouseup", onWindowMouseUp);
+      window.addEventListener("blur", onWindowBlur);
       canvas.addEventListener("wheel", onWheel, { passive: false });
       canvas.addEventListener("contextmenu", onContextMenu);
 
       return () => {
+        stopMiddlePan();
         stage.off("pointerdown", onStagePointerDown);
         stage.off("pointermove", onStagePointerMove);
         stage.off("pointerup", onStagePointerUp);
         stage.off("pointerupoutside", onStagePointerUp);
         for (const remove of removeTokenListeners) remove();
+        canvas.removeEventListener("mousedown", onMiddleMouseDown);
+        window.removeEventListener("mousemove", onWindowMouseMove);
+        window.removeEventListener("mouseup", onWindowMouseUp);
+        window.removeEventListener("blur", onWindowBlur);
         canvas.removeEventListener("wheel", onWheel);
         canvas.removeEventListener("contextmenu", onContextMenu);
       };
